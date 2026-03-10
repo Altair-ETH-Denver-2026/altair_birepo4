@@ -1,0 +1,33 @@
+{
+  "name": "altair-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "lint": "eslint",
+    "postinstall": "node scripts/patch-0g-sdk.js",
+    "patch:0g": "node scripts/patch-0g-sdk.js"
+  },
+  "dependencies": {
+    "@0glabs/0g-ts-sdk": "^0.3.3",
+    "@privy-io/server-auth": "^1.32.5",
+    "@solana/web3.js": "^1.98.0",
+    "ethers": "^6.16.0",
+    "mongoose": "^9.2.2",
+    "next": "16.1.6",
+    "openai": "^6.22.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "viem": "^2.46.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "19.2.14",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "typescript": "^5"
+  },
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+}
