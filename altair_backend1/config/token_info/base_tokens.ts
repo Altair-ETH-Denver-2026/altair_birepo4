@@ -74,3 +74,10 @@ export const SOL = {
   address: '0x311935Cd80B76769bF2ecC9D8Ab7635b2139cf82',
   decimals: 9,
 };
+
+export const WBTC = {
+  symbol: 'WBTC',
+  name: 'LayerZero-Wrapped Bitcoin',
+  address: '0x0555E30da8f98308EdB960aa94C0Db47230d2B9c',
+  decimals: 8,
+};

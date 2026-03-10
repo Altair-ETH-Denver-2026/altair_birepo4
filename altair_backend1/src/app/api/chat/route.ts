@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import OpenAI from 'openai';
-import { CHAT_SUMMARY_LATEST, LLM_MODELS, PROVIDER_KEYS, SYSTEM_PROMPT } from '../../../../config/ai_config';
+import { CHAT_SUMMARY_LATEST, LLM_MODELS, PROVIDER_BASE_URLS, PROVIDER_KEYS, SYSTEM_PROMPT } from '../../../../config/ai_config';
 import { MONGODB_JSONS } from '../../../../config/mongodb_config';
 import { ZG_JSONS } from '../../../../config/zerog_config';
 import { appendChatAndSummary, compactMemoryForPrompt, getChatSummaryMemory } from '@/lib/zg-storage';
@@ -39,15 +39,11 @@ const resolveApiKeyForModel = (model: string): string => {
   return apiKey;
 };
 
-const PROVIDER_BASE_URLS: Partial<Record<LlmProvider, string>> = {
-  X: 'https://api.x.ai/v1',
-};
-
 const createOpenAiClient = (model: string) => {
   const provider = resolveProviderForModel(model);
   return new OpenAI({
     apiKey: resolveApiKeyForModel(model),
-    ...(PROVIDER_BASE_URLS[provider] ? { baseURL: PROVIDER_BASE_URLS[provider] } : {}),
+    ...(PROVIDER_BASE_URLS[provider as keyof typeof PROVIDER_BASE_URLS] ? { baseURL: PROVIDER_BASE_URLS[provider as keyof typeof PROVIDER_BASE_URLS] } : {}),
   });
 };
 
@@ -96,6 +92,7 @@ const generateChatCompletionWithFallback = async (params: {
   }
   let lastError: unknown = null;
   for (const model of candidates) {
+    console.log('[chat] generateChatCompletion with model:', model);
     try {
       return await generateChatCompletion({ model, messages: params.messages });
     } catch (err) {
