@@ -15,6 +15,13 @@ import { getCachedPrivyAccessToken } from '../lib/privyTokenCache';
 import { BLOCKCHAIN, CHAINS, type ChainKey } from '../../config/blockchain_config';
 import * as SolanaTokens from '../../config/token_info/solana_tokens';
 import { CHAT_PANEL } from '../../config/ui_config';
+import {
+  buildChatButtonRowFromIntent,
+  type ChatButtonItem,
+  type ChatButtonRowModel,
+  type ChatSwapIntent,
+} from '../lib/chatButtonRows';
+import ChatButtonRow from './ChatButtonRow';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -24,16 +31,10 @@ interface Message {
   zgHash?: string | null;
   zgError?: string | null;
   cid?: string | null;
+  chatButtonRow?: ChatButtonRowModel | null;
 }
 
-interface SwapIntent {
-  type: 'SINGLE_CHAIN_SWAP_INTENT' | 'CROSS_CHAIN_SWAP_INTENT' | 'BRIDGE_INTENT';
-  sell: string;
-  buy?: string;
-  amount: number | string;
-  sellTokenChain?: string | null;
-  buyTokenChain?: string | null;
-}
+type SwapIntent = ChatSwapIntent;
 
 type ExecutableSwapIntent = SwapIntent & {
   type: 'SINGLE_CHAIN_SWAP_INTENT' | 'CROSS_CHAIN_SWAP_INTENT' | 'BRIDGE_INTENT';
@@ -66,6 +67,7 @@ export default function Chat() {
   const [isExecutingSwap, setIsExecutingSwap] = useState(false);
   const [pendingIntent, setPendingIntent] = useState<SwapIntent | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rowActionsInFlightRef = useRef<Set<string>>(new Set());
   const typingSpeedMs = CHAT_PANEL.typingSpeedMs;
   const logoAsset = useLogoAsset();
 
@@ -261,41 +263,46 @@ export default function Chat() {
     }
 
     const effectiveIntent = (pendingIntent ?? intent) as ExecutableSwapIntent | null;
-    if (!effectiveIntent) {
-      return null;
-    }
+    if (!effectiveIntent) return null;
     setPendingIntent(null);
+    return executeIntentNow(effectiveIntent, cid ?? null);
+  };
 
+  const executeIntentNow = async (
+    effectiveIntent: ExecutableSwapIntent,
+    cid: string | null | undefined
+  ) => {
+    console.log('[ChatButtonRow] executeIntentNow start', {
+      intentType: effectiveIntent.type,
+      cid: cid ?? null,
+    });
     const sell = effectiveIntent.sell?.toUpperCase();
     const buy = effectiveIntent.buy?.toUpperCase();
     const amount = typeof effectiveIntent.amount === 'number' ? effectiveIntent.amount.toString() : effectiveIntent.amount;
 
-    if (!sell) {
-      return null;
-    }
-
-    if (!amount || Number(amount) <= 0) {
-      return null;
-    }
+    if (!sell) return null;
+    if (!amount || Number(amount) <= 0) return null;
 
     if (effectiveIntent.type === 'BRIDGE_INTENT' || effectiveIntent.type === 'CROSS_CHAIN_SWAP_INTENT') {
-      if (!effectiveIntent.sellTokenChain || !effectiveIntent.buyTokenChain) {
-        return null;
-      }
-      const relayResult = await executeRelay({
-        type: effectiveIntent.type,
-        sell,
-        buy,
-        amount,
-        sellTokenChain: effectiveIntent.sellTokenChain,
-        buyTokenChain: effectiveIntent.buyTokenChain,
-      }, cid ?? null);
+      if (!effectiveIntent.sellTokenChain || !effectiveIntent.buyTokenChain) return null;
+      const relayResult = await executeRelay(
+        {
+          type: effectiveIntent.type,
+          sell,
+          buy,
+          amount,
+          sellTokenChain: effectiveIntent.sellTokenChain,
+          buyTokenChain: effectiveIntent.buyTokenChain,
+        },
+        cid ?? null
+      );
+      console.log('[ChatButtonRow] executeIntentNow relay success', {
+        requestId: relayResult.requestId ?? null,
+      });
       return `Relay request submitted: ${relayResult.requestId ?? 'pending'}`;
     }
 
-    if (!buy) {
-      return null;
-    }
+    if (!buy) return null;
 
     const selectedChain = resolveIntentChain(effectiveIntent);
     setIsExecutingSwap(true);
@@ -313,133 +320,270 @@ export default function Chat() {
       const action = normalizedSell === 'ETH' && normalizedBuy === 'WETH'
         ? 'wrapped'
         : 'swapped';
+      console.log('[ChatButtonRow] executeIntentNow swap success', {
+        action,
+        amount,
+        sell: normalizedSell,
+        buy: normalizedBuy,
+      });
       return `Swap executed: ${action} ${amount} ${normalizedSell} for ${buyAmount} ${normalizedBuy}.\n${txHash}`;
     } finally {
       setIsExecutingSwap(false);
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!input.trim() || isLoading || isExecutingSwap) return;
+  const lockChatButtonRow = (params: { targetRowId: string; selectedButtonId: string }) => {
+    setMessages((prev) =>
+      prev.map((message) => {
+        const row = message.chatButtonRow;
+        if (!row || row.id !== params.targetRowId) return message;
+        return {
+          ...message,
+          chatButtonRow: {
+            ...row,
+            isLocked: true,
+            selectedButtonId: params.selectedButtonId,
+          },
+        };
+      })
+    );
+  };
 
-    const userMessage = input;
-    setInput('');
-    setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
-    setIsLoading(true);
+  const isRowCurrentlyActive = (rowId: string) =>
+    messages.some((message) => {
+      const row = message.chatButtonRow;
+      return row?.id === rowId && row?.isActive === true && row?.isLocked !== true;
+    });
 
-    try {
-      const privyAccessToken = authenticated
-        ? await withWaitLogger(
+  const addInstantAssistantMessage = (content: string) => {
+    const normalized = content.replace(/^[\s\r\n]+/, '');
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: 'assistant',
+        content: normalized,
+        displayContent: normalized,
+        isTyping: false,
+      },
+    ]);
+  };
+
+  const appendToLatestAssistantMessage = (content: string) => {
+    const normalized = content.replace(/^[\s\r\n]+/, '');
+    setMessages((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const message = prev[i];
+        if (message.role !== 'assistant') continue;
+        const base = message.content ?? '';
+        const suffix = normalized.length > 0 ? `\n\n${normalized}` : '';
+        const merged = `${base}${suffix}`;
+        const next = [...prev];
+        next[i] = {
+          ...message,
+          content: merged,
+          displayContent: merged,
+          isTyping: false,
+        };
+        return next;
+      }
+      return [
+        ...prev,
+        {
+          role: 'assistant',
+          content: normalized,
+          displayContent: normalized,
+          isTyping: false,
+        },
+      ];
+    });
+  };
+
+  const requestChatResponse = async (params: {
+    userMessage: string;
+    history: Message[];
+  }): Promise<{ content: string; zgHash?: string | null; zgError?: string | null; cid?: string | null }> => {
+    const { userMessage, history } = params;
+    const privyAccessToken = authenticated
+      ? await withWaitLogger(
+          {
+            file: 'altair_frontend1/src/components/Chat.tsx',
+            target: 'Privy getAccessToken',
+            description: 'access token for chat request',
+          },
+          () => getCachedPrivyAccessToken(getAccessToken)
+        )
+      : null;
+    const backendUrl = getBackendBaseUrl();
+
+    console.log('[0G][frontend] chat request', {
+      backendUrl,
+      messageBytes: new TextEncoder().encode(userMessage).length,
+      historyCount: history.length,
+      hasAccessToken: Boolean(privyAccessToken),
+    });
+
+    const maxAttempts = 3;
+    let response: Response | null = null;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        response = await withWaitLogger(
+          {
+            file: 'altair_frontend1/src/components/Chat.tsx',
+            target: '/api/chat',
+            description: 'chat response',
+          },
+          () =>
+            fetch('/api/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                message: userMessage,
+                history: history.map((m) => ({ role: m.role, content: m.content })),
+                accessToken: privyAccessToken ?? null,
+                selectedChain: resolveSelectedChain(),
+                solanaAddress: solanaWallets?.[0]?.address ?? null,
+              }),
+            })
+        );
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Chat request failed with status ${response.status}: ${errorText}`);
+        }
+        break;
+      } catch (err) {
+        lastError = err;
+        console.warn('[0G][frontend] chat request failed', { attempt, error: err });
+        if (attempt < maxAttempts) {
+          await withWaitLogger(
             {
               file: 'altair_frontend1/src/components/Chat.tsx',
-              target: 'Privy getAccessToken',
-              description: 'access token for chat request',
+              target: 'retry backoff',
+              description: `waiting before chat retry ${attempt + 1}`,
             },
-            () => getCachedPrivyAccessToken(getAccessToken)
-          )
-        : null;
-      const backendUrl = getBackendBaseUrl();
-
-      console.log('[0G][frontend] chat request', {
-        backendUrl,
-        messageBytes: new TextEncoder().encode(userMessage).length,
-        historyCount: messages.length,
-        hasAccessToken: Boolean(privyAccessToken),
-      });
-      const maxAttempts = 3;
-      let response: Response | null = null;
-      let lastError: unknown = null;
-
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        try {
-          response = await withWaitLogger(
-            {
-              file: 'altair_frontend1/src/components/Chat.tsx',
-              target: '/api/chat',
-              description: 'chat response',
-            },
-            () =>
-              fetch('/api/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  message: userMessage,
-                  history: messages.map(m => ({ role: m.role, content: m.content })),
-                  // Include Privy access token for backend verification
-                  accessToken: privyAccessToken ?? null,
-                  selectedChain: resolveSelectedChain(),
-                  solanaAddress: solanaWallets?.[0]?.address ?? null,
-                }),
-              })
+            () => new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
           );
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Chat request failed with status ${response.status}: ${errorText}`);
-          }
-          break;
-        } catch (err) {
-          lastError = err;
-          console.warn('[0G][frontend] chat request failed', { attempt, error: err });
-          if (attempt < maxAttempts) {
-            await withWaitLogger(
-              {
-                file: 'altair_frontend1/src/components/Chat.tsx',
-                target: 'retry backoff',
-                description: `waiting before chat retry ${attempt + 1}`,
-              },
-              () => new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
-            );
-          }
         }
       }
+    }
 
-      if (!response) {
-        throw lastError ?? new Error('Chat request failed after retries');
-      }
+    if (!response) {
+      throw lastError ?? new Error('Chat request failed after retries');
+    }
 
-      const responseText = await withWaitLogger(
-        {
-          file: 'altair_frontend1/src/components/Chat.tsx',
-          target: 'chat response.text()',
-          description: 'read chat response body',
-        },
-        () => response.text()
-      );
-      let data: { content?: string; zgHash?: string | null; zgError?: string | null; cid?: string | null } = {};
-      try {
-        data = JSON.parse(responseText) as { content?: string; zgHash?: string | null; zgError?: string | null };
-      } catch (err) {
-        throw new Error(`Chat response was not valid JSON: ${responseText}`);
-      }
-      const content = typeof data.content === 'string' ? data.content : '';
-      console.log('[0G][frontend] chat response', {
-        zgHash: data?.zgHash ?? null,
-        zgError: data?.zgError ?? null,
-        hasContent: typeof data?.content === 'string',
-      });
+    const responseText = await withWaitLogger(
+      {
+        file: 'altair_frontend1/src/components/Chat.tsx',
+        target: 'chat response.text()',
+        description: 'read chat response body',
+      },
+      () => response.text()
+    );
 
-      const intent = extractSwapIntent(content);
+    let data: { content?: string; zgHash?: string | null; zgError?: string | null; cid?: string | null } = {};
+    try {
+      data = JSON.parse(responseText) as { content?: string; zgHash?: string | null; zgError?: string | null; cid?: string | null };
+    } catch {
+      throw new Error(`Chat response was not valid JSON: ${responseText}`);
+    }
+
+    const content = typeof data.content === 'string' ? data.content : '';
+    console.log('[0G][frontend] chat response', {
+      zgHash: data?.zgHash ?? null,
+      zgError: data?.zgError ?? null,
+      hasContent: typeof data?.content === 'string',
+    });
+
+    return {
+      content,
+      zgHash: data.zgHash,
+      zgError: data.zgError,
+      cid: data.cid ?? null,
+    };
+  };
+
+  const setOnlyLatestActiveRow = (nextRowId: string | null) => {
+    setMessages((prev) =>
+      prev.map((message) => {
+        const row = message.chatButtonRow;
+        if (!row) return message;
+        return {
+          ...message,
+          chatButtonRow: {
+            ...row,
+            isActive: nextRowId !== null && row.id === nextRowId,
+          },
+        };
+      })
+    );
+  };
+
+  const sendPromptToChat = async (params: {
+    userMessage: string;
+    appendUserMessage: boolean;
+    allowAutoExecution: boolean;
+  }) => {
+    const { userMessage, appendUserMessage, allowAutoExecution } = params;
+    const historySnapshot = messages;
+
+    if (appendUserMessage) {
+      setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
+    }
+
+    setIsLoading(true);
+    try {
+      const data = await requestChatResponse({ userMessage, history: historySnapshot });
+      const intent = extractSwapIntent(data.content);
       if (intent && intent.type === 'SINGLE_CHAIN_SWAP_INTENT') {
         await prefetchSolanaTokensForIntent(intent);
       }
 
-      const executionNote = await maybeExecuteSwapIntent(intent, data?.cid ?? null, userMessage);
-      if (executionNote) {
-        console.log('[Swap Intent]', data.content);
+      let executionNote: string | null = null;
+      if (allowAutoExecution) {
+        executionNote = await maybeExecuteSwapIntent(intent, data?.cid ?? null, userMessage);
+      }
+
+      const chatButtonRow = executionNote
+        ? null
+        : buildChatButtonRowFromIntent({
+            intent,
+            cid: data?.cid ?? null,
+          });
+
+      if (chatButtonRow) {
+        console.log('[ChatButtonRow] row attached', {
+          rowId: chatButtonRow.id,
+          template: chatButtonRow.template,
+          buttonCount: chatButtonRow.buttons.length,
+        });
       }
 
       setMessages((prev) => {
+        const withInactiveRows = prev.map((message) => {
+          const row = message.chatButtonRow;
+          if (!row?.isActive) return message;
+          return {
+            ...message,
+            chatButtonRow: {
+              ...row,
+              isActive: false,
+              isLocked: true,
+            },
+          };
+        });
+
         if (executionNote) {
-          const normalized = executionNote.replace(/^[\s\r\n]+/, '');
+          const normalizedExecution = executionNote.replace(/^[\s\r\n]+/, '');
           return [
-            ...prev,
-            { role: 'assistant', content: normalized, displayContent: '', isTyping: true },
+            ...withInactiveRows,
+            { role: 'assistant', content: normalizedExecution, displayContent: '', isTyping: true },
           ];
         }
 
-        const normalized = stripIntentJson(content).replace(/^[\s\r\n]+/, '');
+        const normalized = stripIntentJson(data.content).replace(/^[\s\r\n]+/, '');
         return [
-          ...prev,
+          ...withInactiveRows,
           {
             role: 'assistant',
             content: normalized,
@@ -448,14 +592,79 @@ export default function Chat() {
             zgHash: data.zgHash,
             zgError: data.zgError,
             cid: data?.cid ?? null,
+            chatButtonRow,
           },
         ];
       });
+
+      setOnlyLatestActiveRow(chatButtonRow?.id ?? null);
     } catch (error) {
-      console.error("Chat error:", error);
+      console.error('Chat error:', error);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleChatButtonRowAction = async (button: ChatButtonItem, row: ChatButtonRowModel) => {
+    const inFlightKey = `${row.id}:${button.id}`;
+    if (row.isActive === false || row.isLocked === true) return;
+    if (!isRowCurrentlyActive(row.id)) return;
+    if (rowActionsInFlightRef.current.has(inFlightKey)) return;
+
+    rowActionsInFlightRef.current.add(inFlightKey);
+
+    console.log('[ChatButtonRow] action click (lock-only mode)', {
+      rowId: row.id,
+      template: row.template,
+      buttonId: button.id,
+      buttonLabel: button.label,
+      actionKind: button.action.kind,
+    });
+
+    lockChatButtonRow({ targetRowId: row.id, selectedButtonId: button.id });
+
+    try {
+      if (button.action.kind === 'RUN_LOCAL') {
+        addInstantAssistantMessage(button.action.presetAssistantMessage);
+        if (button.action.actionId === 'CANCEL_SWAP') {
+          setPendingIntent(null);
+          console.log('[ChatButtonRow] action cancel swap', { rowId: row.id });
+          return;
+        }
+        if (button.action.actionId === 'CONFIRM_SWAP') {
+          const intent = row.context?.intent as ExecutableSwapIntent | null | undefined;
+          if (!intent) return;
+          const execution = await executeIntentNow(intent, row.context?.cid ?? null);
+          if (execution) {
+            appendToLatestAssistantMessage(execution);
+          }
+          return;
+        }
+        return;
+      }
+
+      if (button.action.kind === 'ASK_LLM') {
+        console.log('[ChatButtonRow] action ask llm', {
+          rowId: row.id,
+          promptSeed: button.action.promptSeed,
+        });
+        await sendPromptToChat({
+          userMessage: button.action.promptSeed,
+          appendUserMessage: false,
+          allowAutoExecution: false,
+        });
+      }
+    } finally {
+      rowActionsInFlightRef.current.delete(inFlightKey);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!input.trim() || isLoading || isExecutingSwap) return;
+
+    const userMessage = input;
+    setInput('');
+    await sendPromptToChat({ userMessage, appendUserMessage: true, allowAutoExecution: true });
   };
 
   return (
@@ -497,6 +706,13 @@ export default function Chat() {
                   }}
                 >
                   {m.role === 'assistant' ? (m.displayContent ?? '') : m.content}
+                  {m.chatButtonRow?.isActive && (
+                    <ChatButtonRow
+                      row={m.chatButtonRow}
+                      disabled={isLoading || isExecutingSwap}
+                      onAction={handleChatButtonRowAction}
+                    />
+                  )}
                 </div>
                 {m.zgHash && !m.zgError && (
                   <div className="flex items-center gap-2 mt-1">

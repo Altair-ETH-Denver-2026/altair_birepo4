@@ -1,19 +1,19 @@
 export const LLM_MODELS = {
-  runningSummary: 
-    ['llama-3.3-70b-versatile',
-     'qwen3-32b',
-     'openai/gpt-oss-20b',
-     'openai/gpt-oss-120b',
-     'llama-3.1-8b-instant',
+  runningSummary: [
+    //  'llama-3.3-70b-versatile',
+    //  'qwen3-32b',
+    //  'openai/gpt-oss-20b',
+    //  'openai/gpt-oss-120b',
+    //  'llama-3.1-8b-instant',
      'grok-4-fast',
      'grok-4',
      'gpt-4o-mini'], // model fallback order for generating running chat summaries in Altair
   mainChat: [
-     'llama-3.3-70b-versatile',
-     'qwen3-32b',
-     'openai/gpt-oss-20b',
-     'openai/gpt-oss-120b',
-     'llama-3.1-8b-instant',
+    //  'llama-3.3-70b-versatile',
+    //  'qwen3-32b',
+    //  'openai/gpt-oss-20b',
+    //  'openai/gpt-oss-120b',
+    //  'llama-3.1-8b-instant',
      'grok-4-fast',
      'grok-4',
      'gpt-4o-mini'], // primary assistant response models for the trading assistant experience
