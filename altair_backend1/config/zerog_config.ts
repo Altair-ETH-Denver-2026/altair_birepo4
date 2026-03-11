@@ -17,7 +17,8 @@ export const ZG_JSONS = {
       {
         userMessage: '', // user utterance stored for AI context and audit
         assistantReply: '', // assistant response stored for AI context and audit
-        hadSwapExecution: false, // flag indicating if a swap executed in this chat turn
+        intentString: null, // nullable intent classification for this chat turn
+        intentExecuted: false, // whether detected intent from this turn was executed
         timestamp: '', // timestamp recorded for ordering 0G chat history
       },
     ],
@@ -62,7 +63,8 @@ export const ZG_JSONS = {
         CID: '', // content ID for each chat turn stored in 0G
         userMessage: '', // user utterance stored for AI recall
         assistantReply: '', // assistant reply stored for AI recall
-        hadSwapExecution: false, // indicates whether the turn executed a swap
+        intentString: null, // nullable intent classification for this chat turn
+        intentExecuted: false, // indicates whether the intent was executed
         timestamp: '', // timestamp for ordering summary chat turns
         swap: null, // optional swap metadata attached to the chat turn
       },

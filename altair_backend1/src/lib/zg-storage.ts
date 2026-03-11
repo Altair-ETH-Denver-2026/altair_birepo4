@@ -647,7 +647,8 @@ export function compactMemoryForPrompt(memory: Record<string, unknown>): Record<
             CID: typeof turn.CID === 'string' ? turn.CID : null,
             userMessage: typeof turn.userMessage === 'string' ? turn.userMessage.slice(0, 160) : null,
             assistantReply: typeof turn.assistantReply === 'string' ? turn.assistantReply.slice(0, 220) : null,
-            hadSwapExecution: typeof turn.hadSwapExecution === 'boolean' ? turn.hadSwapExecution : null,
+            intentString: typeof turn.intentString === 'string' ? turn.intentString : null,
+            intentExecuted: typeof turn.intentExecuted === 'boolean' ? turn.intentExecuted : null,
             timestamp: typeof turn.timestamp === 'string' ? turn.timestamp : null,
             swap: swap
               ? {
@@ -713,7 +714,8 @@ const CHAT_HISTORY_MAX = 100;
 export type ChatHistoryEntry = {
   userMessage: string;
   assistantReply: string;
-  hadSwapExecution: boolean;
+  intentString?: string | null;
+  intentExecuted: boolean;
   timestamp: string;
 };
 
@@ -843,7 +845,8 @@ export async function getChatHistory(
 type AppendChatParams = Omit<GetMemoryParams, 'key'> & {
   userMessage: string;
   assistantReply: string;
-  hadSwapExecution?: boolean;
+  intentString?: string | null;
+  intentExecuted?: boolean;
   timestamp?: string;
 };
 
@@ -852,10 +855,11 @@ type AppendChatSummaryParams = AppendChatParams & {
 };
 
 export async function appendChatAndSummary(params: AppendChatSummaryParams): Promise<ArchiveResult> {
-  const { userMessage, assistantReply, hadSwapExecution, accessToken, timestamp, summary } = params;
+  const { userMessage, assistantReply, intentString, intentExecuted, accessToken, timestamp, summary } = params;
   if (ZG_VERBOSE) {
     console.log('[0G][chat-bundle] append start', {
-      hadSwapExecution: Boolean(hadSwapExecution),
+      intentString: intentString ?? null,
+      intentExecuted: Boolean(intentExecuted),
       timestamp: timestamp ?? null,
     });
   }
@@ -889,7 +893,8 @@ export async function appendChatAndSummary(params: AppendChatSummaryParams): Pro
   const entry: ChatHistoryEntry = {
     userMessage,
     assistantReply,
-    hadSwapExecution: Boolean(hadSwapExecution),
+    intentString: intentString ?? null,
+    intentExecuted: Boolean(intentExecuted),
     timestamp: timestamp ?? new Date().toISOString(),
   };
   chats = [...chats, entry].slice(-CHAT_HISTORY_MAX);
@@ -926,10 +931,11 @@ export async function appendChatAndSummary(params: AppendChatSummaryParams): Pro
 }
 
 export async function appendChatToHistoryLegacy(params: AppendChatParams): Promise<ArchiveResult> {
-  const { userMessage, assistantReply, hadSwapExecution, accessToken, timestamp } = params;
+  const { userMessage, assistantReply, intentString, intentExecuted, accessToken, timestamp } = params;
   if (ZG_VERBOSE) {
     console.log('[0G][chat-history] append start', {
-      hadSwapExecution: Boolean(hadSwapExecution),
+      intentString: intentString ?? null,
+      intentExecuted: Boolean(intentExecuted),
       timestamp: timestamp ?? null,
     });
   }
@@ -962,7 +968,8 @@ export async function appendChatToHistoryLegacy(params: AppendChatParams): Promi
   const entry: ChatHistoryEntry = {
     userMessage,
     assistantReply,
-    hadSwapExecution: Boolean(hadSwapExecution),
+    intentString: intentString ?? null,
+    intentExecuted: Boolean(intentExecuted),
     timestamp: timestamp ?? new Date().toISOString(),
   };
   console.log('[0G][chat-history] Newest Chat: entry', entry);

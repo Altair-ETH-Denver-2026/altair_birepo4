@@ -115,7 +115,8 @@ type ChatSummaryTurn = {
   CID?: string | null;
   userMessage: string;
   assistantReply: string;
-  hadSwapExecution: boolean;
+  intentString?: string | null;
+  intentExecuted: boolean;
   timestamp: string;
   swap?: {
     SID?: string | null;
@@ -165,7 +166,8 @@ function buildUpdatedChatSummary(params: {
         CID: typeof turn.CID === 'string' ? turn.CID : null,
         userMessage: typeof turn.userMessage === 'string' ? turn.userMessage : '',
         assistantReply: typeof turn.assistantReply === 'string' ? turn.assistantReply : '',
-        hadSwapExecution: Boolean(turn.hadSwapExecution),
+        intentString: typeof turn.intentString === 'string' ? turn.intentString : null,
+        intentExecuted: Boolean(turn.intentExecuted),
         timestamp: typeof turn.timestamp === 'string' ? turn.timestamp : new Date().toISOString(),
         swap: typeof turn.swap === 'object' && turn.swap !== null ? (turn.swap as ChatSummaryTurn['swap']) : null,
       };
@@ -192,7 +194,8 @@ function buildUpdatedChatSummary(params: {
     CID: params.chatCID ?? null,
     userMessage: truncateText(params.userMessage, 260),
     assistantReply: truncateText(params.assistantReply, 340),
-    hadSwapExecution: false,
+    intentString: null,
+    intentExecuted: false,
     timestamp: new Date().toISOString(),
     swap: null,
   };
@@ -316,7 +319,7 @@ function buildChatSummaryPayload(params: {
 
 export async function POST(req: Request) {
   try {
-    const t0 = Date.now();
+  const t0 = Date.now();
     console.log('[chat] request start', { at: new Date(t0).toISOString() });
     const { message, history, accessToken, selectedChain, solanaAddress } = await req.json();
     const cookieStore = await cookies();
@@ -330,7 +333,8 @@ export async function POST(req: Request) {
     let zgError: string | null = null;
     let priorMemory: Record<string, unknown> | null = null;
     let priorSummaryText = '';
-    let hadSwapExecution = false;
+    let intentString: string | null = null;
+    let intentExecuted = false;
     let balanceContext: Record<string, unknown> | null = null;
     let balanceContextForPrompt: Record<string, unknown> | null = null;
     let swapHistoryContext: Record<string, unknown>[] | null = null;
@@ -405,7 +409,8 @@ export async function POST(req: Request) {
                       CID: 1,
                       userMessage: 1,
                       assistantReply: 1,
-                      hadSwapExecution: 1,
+                      intentString: 1,
+                      intentExecuted: 1,
                       timestamp: 1,
                       createdAt: 1,
                     })
@@ -458,7 +463,8 @@ export async function POST(req: Request) {
               CID: cidValue,
               userMessage: typeof item.userMessage === 'string' ? item.userMessage : '',
               assistantReply: typeof item.assistantReply === 'string' ? item.assistantReply : '',
-              hadSwapExecution: Boolean(item.hadSwapExecution),
+              intentString: typeof item.intentString === 'string' ? item.intentString : null,
+              intentExecuted: Boolean(item.intentExecuted),
               timestamp: typeof item.timestamp === 'string'
                 ? item.timestamp
                 : typeof item.createdAt === 'string'
@@ -589,11 +595,9 @@ export async function POST(req: Request) {
       ],
     });
     console.log('[chat] aiResponse:', aiResponse);
-    hadSwapExecution = aiResponse.includes('"type"') && (
-      aiResponse.includes('SINGLE_CHAIN_SWAP_INTENT') ||
-      aiResponse.includes('CROSS_CHAIN_SWAP_INTENT') ||
-      aiResponse.includes('BRIDGE_INTENT')
-    );
+    const intentTypeCandidates = ['SINGLE_CHAIN_SWAP_INTENT', 'CROSS_CHAIN_SWAP_INTENT', 'BRIDGE_INTENT'] as const;
+    intentString = intentTypeCandidates.find((candidate) => aiResponse.includes(candidate)) ?? null;
+    intentExecuted = false;
 
     const executionNote: string | null = null;
 
@@ -618,7 +622,8 @@ export async function POST(req: Request) {
         ...chatTemplate,
         userMessage: message,
         assistantReply: aiResponse,
-        hadSwapExecution,
+        intentString,
+        intentExecuted,
         timestamp: new Date().toISOString(),
       };
       await withWaitLogger(
@@ -639,6 +644,7 @@ export async function POST(req: Request) {
         () =>
           Chat.create({
             CID,
+            SID: null,
             UID: user.UID,
             evmAddress: user.evmAddress ?? null,
             solAddress: user.solAddress ?? null,
@@ -667,7 +673,8 @@ export async function POST(req: Request) {
               accessToken: resolvedAccessToken,
               userMessage: message,
               assistantReply: aiResponse,
-              hadSwapExecution,
+              intentString,
+              intentExecuted,
               summary: summaryPayload,
             });
             const asyncHash = write.txHash ?? null;

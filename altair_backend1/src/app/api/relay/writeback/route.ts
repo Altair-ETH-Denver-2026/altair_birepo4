@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { connectToDatabase } from '@/lib/db';
 import { Swap } from '@/models/Swap';
+import { Chat } from '@/models/Chat';
 import { generateSwapID } from '@/lib/id';
 import { appendSwapToHistory } from '@/lib/zg-storage';
 import { withWaitLogger } from '@/lib/waitLogger';
@@ -85,8 +86,10 @@ export async function POST(req: Request) {
       balanceAfter: payload.buyToken.balanceAfter ?? null,
     };
 
+    const SID = await generateSwapID();
+
     const swapDoc = {
-      SID: await generateSwapID(),
+      SID,
       UID: user.UID,
       CID: payload.cid ?? null,
       intentString: payload.intentString ?? null,
@@ -104,6 +107,27 @@ export async function POST(req: Request) {
       },
       () => Swap.create(swapDoc)
     );
+
+    if (payload.cid) {
+      await withWaitLogger(
+        {
+          file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+          target: 'Chat.updateOne',
+          description: 'mark chat intent as executed (relay writeback)',
+        },
+        () =>
+          Chat.updateOne(
+            { CID: payload.cid, UID: user.UID },
+            {
+              $set: {
+                SID,
+                intentString: payload.intentString ?? null,
+                intentExecuted: true,
+              },
+            }
+          )
+      );
+    }
 
     await withWaitLogger(
       {

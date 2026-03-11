@@ -20,7 +20,8 @@ export async function POST(req: Request) {
               {
                 userMessage: 'test write',
                 assistantReply: 'test read',
-                hadSwapExecution: false,
+                intentString: null,
+                intentExecuted: false,
                 timestamp: new Date().toISOString(),
               },
             ],
@@ -33,7 +34,8 @@ export async function POST(req: Request) {
                   CID: '0c-test',
                   userMessage: 'test write',
                   assistantReply: 'test read',
-                  hadSwapExecution: false,
+                  intentString: 'SINGLE_CHAIN_SWAP_INTENT',
+                  intentExecuted: false,
                   timestamp: new Date().toISOString(),
                   swap: {
                     SID: '0s-test',

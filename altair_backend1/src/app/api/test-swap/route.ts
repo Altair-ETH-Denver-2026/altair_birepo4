@@ -23,6 +23,7 @@ import { connectToDatabase } from '@/lib/db';
 import { syncUserFromAccessToken } from '@/lib/users';
 import { withWaitLogger } from '@/lib/waitLogger';
 import { Swap } from '@/models/Swap';
+import { Chat } from '@/models/Chat';
 import { generateSwapID } from '@/lib/id';
 import { formatAmountFromRaw, parseAmountToRaw } from '@/lib/amounts';
 import { MONGODB_JSONS } from '../../../../config/mongodb_config';
@@ -801,9 +802,10 @@ export async function POST(req: Request) {
             altair: { token: '', amount: '' },
           },
         };
+        const SID = await generateSwapID();
         console.log('[test-swap] MongoDB swap data:')
         console.log({
-          SID: await generateSwapID(),
+          SID,
           UID: user.UID,
           CID,
           intentString: 'SINGLE_CHAIN_SWAP_INTENT',
@@ -822,7 +824,7 @@ export async function POST(req: Request) {
           async () =>
             Swap.create({
               ...swapTemplate,
-              SID: await generateSwapID(),
+              SID,
               UID: user.UID,
               CID,
               intentString: 'SINGLE_CHAIN_SWAP_INTENT',
@@ -831,6 +833,24 @@ export async function POST(req: Request) {
               txHash,
               timestamp: new Date().toISOString(),
             })
+        );
+        await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/test-swap/route.ts',
+            target: 'Chat.updateOne',
+            description: 'mark chat intent as executed (swap writeback)',
+          },
+          () =>
+            Chat.updateOne(
+              { CID, UID: user.UID },
+              {
+                $set: {
+                  SID,
+                  intentString: 'SINGLE_CHAIN_SWAP_INTENT',
+                  intentExecuted: true,
+                },
+              }
+            )
         );
       } catch (dbErr) {
         console.warn('[test-swap] swap db write failed', dbErr);
