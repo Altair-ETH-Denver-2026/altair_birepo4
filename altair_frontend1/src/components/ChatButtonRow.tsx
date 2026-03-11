@@ -23,9 +23,9 @@ export default function ChatButtonRow({ row, disabled = false, onAction }: ChatB
         const isHovered = hoveredId === button.id;
         const isSelected = row.selectedButtonId === button.id;
         const isActive = isSelected || activeId === button.id;
-        const isDisabled = disabled || row.isActive === false;
+        const isDisabled = disabled;
         const isLocked = row.isLocked === true;
-        const isNativeDisabled = isDisabled || (isLocked && !isSelected);
+        const isNativeDisabled = isDisabled || (!isSelected && (isLocked || row.isActive === false));
         const isInteractive = !isNativeDisabled && !isSelected;
         const backgroundColor = isActive
           ? config.activeColor
@@ -56,7 +56,7 @@ export default function ChatButtonRow({ row, disabled = false, onAction }: ChatB
               setActiveId(button.id);
             }}
             onMouseUp={() => setActiveId((current) => (current === button.id ? null : current))}
-            className="transition-colors"
+            className="transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
               color: config.textColor,
               backgroundColor,
@@ -70,6 +70,7 @@ export default function ChatButtonRow({ row, disabled = false, onAction }: ChatB
               paddingBottom: `${config.paddingBottom}px`,
               fontSize: `${config.fontSize}px`,
               fontFamily: config.fontName,
+              opacity: isNativeDisabled ? 0.5 : 1,
               cursor: isInteractive && !isSelected ? 'pointer' : 'default',
             }}
           >

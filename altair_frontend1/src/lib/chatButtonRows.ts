@@ -1,5 +1,7 @@
 'use client';
 
+import { CHAT_BUTTON_ROW_TEMPLATES as AI_CHAT_BUTTON_ROW_TEMPLATES } from '../../../altair_backend1/config/ai_config';
+
 export type ChatSwapIntent = {
   type: 'SINGLE_CHAIN_SWAP_INTENT' | 'CROSS_CHAIN_SWAP_INTENT' | 'BRIDGE_INTENT';
   sell: string;
@@ -27,6 +29,7 @@ export type ChatButtonItem = {
 };
 
 export type ChatButtonRowTemplateKey = 'CONFIRM_SWAP' | 'SWAP_FOLLOWUP';
+export type ChatButtonRowLogicTrigger = 'TRANSACTION_SUBMITTED';
 
 export type ChatButtonRowModel = {
   id: string;
@@ -54,46 +57,17 @@ const isSwapIntent = (intent: ChatSwapIntent | null): intent is ChatSwapIntent =
         intent.type === 'BRIDGE_INTENT')
   );
 
-const buildConfirmSwapTemplate = (params: {
+const buildTemplateFromConfig = (params: {
+  template: ChatButtonRowTemplateKey;
   intent: ChatSwapIntent;
   cid?: string | null;
-}): ChatButtonRowModel => ({
-  id: `row-confirm-swap-${Date.now()}`,
-  template: 'CONFIRM_SWAP',
-  isActive: true,
-  isLocked: false,
-  selectedButtonId: null,
-  context: {
-    intent: params.intent,
-    cid: params.cid ?? null,
-  },
-  buttons: [
-    {
-      id: 'confirm',
-      label: 'Confirm',
-      action: {
-        kind: 'RUN_LOCAL',
-        actionId: 'CONFIRM_SWAP',
-        presetAssistantMessage: 'Swap confirmed!',
-      },
-    },
-    {
-      id: 'cancel',
-      label: 'Cancel',
-      action: {
-        kind: 'RUN_LOCAL',
-        actionId: 'CANCEL_SWAP',
-        presetAssistantMessage: 'Swap canceled.',
-      },
-    },
-  ],
-});
-
-export const CHAT_BUTTON_ROW_TEMPLATES: Record<ChatButtonRowTemplateKey, ChatButtonRowTemplateFactory> = {
-  CONFIRM_SWAP: buildConfirmSwapTemplate,
-  SWAP_FOLLOWUP: (params) => ({
-    id: `row-swap-followup-${Date.now()}`,
-    template: 'SWAP_FOLLOWUP',
+}): ChatButtonRowModel => {
+  const templateConfig = CHAT_BUTTON_ROW_TEMPLATES[params.template];
+  const tokenLabel = String(params.intent.buy ?? params.intent.sell ?? 'TOKEN').toUpperCase();
+  const templateButtons = AI_CHAT_BUTTON_ROW_TEMPLATES[params.template].buttons;
+  return {
+    id: `row-${params.template.toLowerCase()}-${Date.now()}`,
+    template: params.template,
     isActive: true,
     isLocked: false,
     selectedButtonId: null,
@@ -101,35 +75,43 @@ export const CHAT_BUTTON_ROW_TEMPLATES: Record<ChatButtonRowTemplateKey, ChatBut
       intent: params.intent,
       cid: params.cid ?? null,
     },
-    buttons: [
-      {
-        id: 'start-earning',
-        label: `Start Earning with ${String(params.intent.buy ?? params.intent.sell ?? 'TOKEN').toUpperCase()}`,
-        action: {
-          kind: 'RUN_LOCAL',
-          actionId: 'START_EARNING',
-          presetAssistantMessage: 'Starting earning flow…',
-        },
-      },
-      {
-        id: 'learn-more',
-        label: `Learn More About ${String(params.intent.buy ?? params.intent.sell ?? 'TOKEN').toUpperCase()}`,
-        action: {
-          kind: 'RUN_LOCAL',
-          actionId: 'LEARN_MORE',
-          presetAssistantMessage: 'Opening token details…',
-        },
-      },
-      {
-        id: 'something-else',
-        label: 'Something Else',
-        action: {
-          kind: 'ASK_LLM',
-          promptSeed: "The user isn't sure what they want to do next. Suggest practical next steps.",
-        },
-      },
-    ],
-  }),
+    buttons: templateButtons.map((button) => ({
+      ...button,
+      label: button.label.replace('TOKEN', tokenLabel),
+    })),
+  };
+};
+
+export const CHAT_BUTTON_ROW_TEMPLATES: Record<ChatButtonRowTemplateKey, ChatButtonRowTemplateFactory> = {
+  CONFIRM_SWAP: (params) => buildTemplateFromConfig({ template: 'CONFIRM_SWAP', ...params }),
+  SWAP_FOLLOWUP: (params) => buildTemplateFromConfig({ template: 'SWAP_FOLLOWUP', ...params }),
+};
+
+export const buildChatButtonRowFromLogicTrigger = (params: {
+  trigger: ChatButtonRowLogicTrigger;
+  intent: ChatSwapIntent;
+  cid?: string | null;
+}): ChatButtonRowModel | null => {
+  const templates = Object.entries(AI_CHAT_BUTTON_ROW_TEMPLATES) as Array<
+    [ChatButtonRowTemplateKey, (typeof AI_CHAT_BUTTON_ROW_TEMPLATES)[ChatButtonRowTemplateKey]]
+  >;
+
+  for (const [templateKey, templateConfig] of templates) {
+    const rawLogicTriggers =
+      'logicTriggers' in templateConfig
+        ? (templateConfig as { logicTriggers?: readonly string[] }).logicTriggers
+        : undefined;
+    const logicTriggers = Array.isArray(rawLogicTriggers)
+      ? [...rawLogicTriggers]
+      : [];
+    if (!logicTriggers.includes(params.trigger)) continue;
+    return CHAT_BUTTON_ROW_TEMPLATES[templateKey]({
+      intent: params.intent,
+      cid: params.cid ?? null,
+    });
+  }
+
+  return null;
 };
 
 export const buildChatButtonRowFromIntent = (params: {

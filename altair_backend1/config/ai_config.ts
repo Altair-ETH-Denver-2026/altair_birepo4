@@ -1,3 +1,5 @@
+import { SWAP_SUBMITTED } from './ui_messages';
+
 export const LLM_MODELS = {
   runningSummary: [
     //  'llama-3.3-70b-versatile',
@@ -59,7 +61,7 @@ export const LLM_MODELS = {
 
     // Groq Models
     'llama-3.1-8b-instant': 'Groq',
-    // 'llama-4-scout-17b-16e-instruct': 'Groq',
+    'llama-4-scout-17b-16e-instruct': 'Groq',
     'openai/gpt-oss-20b': 'Groq',
     'openai/gpt-oss-120b': 'Groq',
     'llama-3.3-70b-versatile': 'Groq',
@@ -96,6 +98,68 @@ export const INTENTS = {
   // UI_INTENTS {
   //    BUTTONS}
 };
+
+export const CHAT_BUTTON_ROW_TEMPLATES = {
+  CONFIRM_SWAP: {
+    intentTriggers: ['SWAP_INTENTS'],
+    responseList: SWAP_SUBMITTED,
+    buttons: [
+      {
+        id: 'confirm',
+        label: 'Confirm',
+        action: {
+          kind: 'RUN_LOCAL',
+          actionId: 'CONFIRM_SWAP',
+          presetAssistantMessage: 'Swap confirmed!',
+        },
+      },
+      {
+        id: 'cancel',
+        label: 'Cancel',
+        action: {
+          kind: 'RUN_LOCAL',
+          actionId: 'CANCEL_SWAP',
+          presetAssistantMessage: 'Swap canceled.',
+        },
+      },
+    ],
+  },
+  SWAP_FOLLOWUP: {
+    intentTriggers: [],
+    logicTriggers: ['TRANSACTION_SUBMITTED'],
+    responseList: [],
+    buttons: [
+      {
+        id: 'start-earning',
+        label: 'Start Earning with TOKEN',
+        action: {
+          kind: 'RUN_LOCAL',
+          actionId: 'START_EARNING',
+          presetAssistantMessage: 'Starting earning flow…',
+        },
+      },
+      {
+        id: 'learn-more',
+        label: 'Learn More About TOKEN',
+        action: {
+          kind: 'RUN_LOCAL',
+          actionId: 'LEARN_MORE',
+          presetAssistantMessage: 'Opening token details…',
+        },
+      },
+      {
+        id: 'something-else',
+        label: 'Something Else',
+        action: {
+          kind: 'ASK_LLM',
+          promptSeed: "The user isn't sure what they want to do next. Suggest practical next steps.",
+        },
+      },
+    ],
+  },
+} as const;
+
+
 
 export const SYSTEM_PROMPT = {
   basePrompt: `

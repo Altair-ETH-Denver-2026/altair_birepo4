@@ -15,8 +15,10 @@ import { getCachedPrivyAccessToken } from '../lib/privyTokenCache';
 import { BLOCKCHAIN, CHAINS, type ChainKey } from '../../config/blockchain_config';
 import * as SolanaTokens from '../../config/token_info/solana_tokens';
 import { CHAT_PANEL } from '../../config/ui_config';
+import { CHAT_BUTTON_ROW_TEMPLATES } from '../../../altair_backend1/config/ai_config';
 import {
   buildChatButtonRowFromIntent,
+  buildChatButtonRowFromLogicTrigger,
   type ChatButtonItem,
   type ChatButtonRowModel,
   type ChatSwapIntent,
@@ -398,6 +400,50 @@ export default function Chat() {
     });
   };
 
+  const appendToLatestAssistantMessageWithRow = (params: {
+    content: string;
+    chatButtonRow: ChatButtonRowModel | null;
+  }) => {
+    const normalized = params.content.replace(/^[\s\r\n]+/, '');
+    setMessages((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const message = prev[i];
+        if (message.role !== 'assistant') continue;
+        const base = message.content ?? '';
+        const suffix = normalized.length > 0 ? `\n\n${normalized}` : '';
+        const merged = `${base}${suffix}`;
+        const next = [...prev];
+        next[i] = {
+          ...message,
+          content: merged,
+          displayContent: merged,
+          isTyping: false,
+          chatButtonRow: params.chatButtonRow ?? message.chatButtonRow ?? null,
+        };
+        return next;
+      }
+      return [
+        ...prev,
+        {
+          role: 'assistant',
+          content: normalized,
+          displayContent: normalized,
+          isTyping: false,
+          chatButtonRow: params.chatButtonRow,
+        },
+      ];
+    });
+  };
+
+  const getRandomSwapSubmittedMessage = () => {
+    const responseList = [...CHAT_BUTTON_ROW_TEMPLATES.CONFIRM_SWAP.responseList] as string[];
+    if (responseList.length <= 0) {
+      return 'Swap confirmed!';
+    }
+    const randomIndex = Math.floor(Math.random() * responseList.length);
+    return responseList[randomIndex] ?? 'Swap confirmed!';
+  };
+
   const requestChatResponse = async (params: {
     userMessage: string;
     history: Message[];
@@ -625,7 +671,10 @@ export default function Chat() {
 
     try {
       if (button.action.kind === 'RUN_LOCAL') {
-        addInstantAssistantMessage(button.action.presetAssistantMessage);
+        const instantMessage = button.action.actionId === 'CONFIRM_SWAP'
+          ? getRandomSwapSubmittedMessage()
+          : button.action.presetAssistantMessage;
+        addInstantAssistantMessage(instantMessage);
         if (button.action.actionId === 'CANCEL_SWAP') {
           setPendingIntent(null);
           console.log('[ChatButtonRow] action cancel swap', { rowId: row.id });
@@ -636,10 +685,32 @@ export default function Chat() {
           if (!intent) return;
           const execution = await executeIntentNow(intent, row.context?.cid ?? null);
           if (execution) {
-            appendToLatestAssistantMessage(execution);
+            const swapFollowupRow = buildChatButtonRowFromLogicTrigger({
+              trigger: 'TRANSACTION_SUBMITTED',
+              intent,
+              cid: row.context?.cid ?? null,
+            });
+            appendToLatestAssistantMessageWithRow({
+              content: execution,
+              chatButtonRow: swapFollowupRow,
+            });
+            if (swapFollowupRow) {
+              setOnlyLatestActiveRow(swapFollowupRow.id);
+            }
           }
           return;
         }
+
+        if (button.action.actionId === 'START_EARNING') {
+          addInstantAssistantMessage('Start Earning flow is not wired yet. Placeholder response.');
+          return;
+        }
+
+        if (button.action.actionId === 'LEARN_MORE') {
+          addInstantAssistantMessage('Learn More flow is not wired yet. Placeholder response.');
+          return;
+        }
+
         return;
       }
 
@@ -657,6 +728,27 @@ export default function Chat() {
     } finally {
       rowActionsInFlightRef.current.delete(inFlightKey);
     }
+  };
+
+  const getLatestActiveConfirmSwapRow = (): ChatButtonRowModel | null => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const row = messages[i]?.chatButtonRow;
+      if (!row) continue;
+      if (row.template !== 'CONFIRM_SWAP') continue;
+      if (row.isActive === false) continue;
+      if (row.isLocked === true) continue;
+      return row;
+    }
+    return null;
+  };
+
+  const triggerChatButtonRowActionById = async (params: {
+    row: ChatButtonRowModel;
+    buttonId: string;
+  }) => {
+    const button = params.row.buttons.find((entry) => entry.id === params.buttonId);
+    if (!button) return;
+    await handleChatButtonRowAction(button, params.row);
   };
 
   const handleSendMessage = async () => {
@@ -706,12 +798,12 @@ export default function Chat() {
                   }}
                 >
                   {m.role === 'assistant' ? (m.displayContent ?? '') : m.content}
-                  {m.chatButtonRow?.isActive && (
-                    <ChatButtonRow
-                      row={m.chatButtonRow}
-                      disabled={isLoading || isExecutingSwap}
-                      onAction={handleChatButtonRowAction}
-                    />
+                {m.chatButtonRow && (
+                  <ChatButtonRow
+                    row={m.chatButtonRow}
+                    disabled={isLoading || isExecutingSwap}
+                    onAction={handleChatButtonRowAction}
+                  />
                   )}
                 </div>
                 {m.zgHash && !m.zgError && (
@@ -773,7 +865,26 @@ export default function Chat() {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              const row = getLatestActiveConfirmSwapRow();
+              if (!row) return;
+              e.preventDefault();
+              void triggerChatButtonRowActionById({ row, buttonId: 'cancel' });
+              return;
+            }
+
+            if (e.key === 'Enter') {
+              if (!input.trim()) {
+                const row = getLatestActiveConfirmSwapRow();
+                if (!row) return;
+                e.preventDefault();
+                void triggerChatButtonRowActionById({ row, buttonId: 'confirm' });
+                return;
+              }
+              void handleSendMessage();
+            }
+          }}
           placeholder="I want to swap 0.1 ETH for USDC..."
           className="flex-1 bg-gray-800/50 border border-gray-700 rounded-xl px-4 py-2 text-sm outline-none focus:border-[var(--chat-highlight-color)] transition-colors"
           style={{ ['--chat-highlight-color' as never]: CHAT_PANEL.chat_highlight_color }}
