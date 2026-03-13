@@ -564,7 +564,7 @@ const applyTokenEnvOverrides = (chainKey: ChainKey, tokens: Record<string, Token
 
 export async function POST(req: Request) {
   try {
-    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID } = (await req
+    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody } = (await req
       .json()
       .catch(() => ({
         chain: null,
@@ -574,6 +574,7 @@ export async function POST(req: Request) {
         recipient: null,
         txHash: null,
         CID: null,
+        provider: null,
       }))) as {
       chain?: ChainKey | null;
       buyToken?: string | null;
@@ -582,6 +583,7 @@ export async function POST(req: Request) {
       recipient?: string | null;
       txHash?: string | null;
       CID?: string | null;
+      provider?: string | null;
     };
 
     const resolvedChainKey: ChainKey =
@@ -625,6 +627,11 @@ export async function POST(req: Request) {
     }
 
     const isSolana = resolvedChainKey === 'SOLANA_MAINNET';
+    const provider = typeof providerFromBody === 'string' && providerFromBody.trim().length > 0
+      ? providerFromBody.trim()
+      : isSolana
+        ? 'Jupiter'
+        : '0x';
     const nativeSymbol = isSolana ? 'SOL' : 'ETH';
     // const supportedSell = normalizedSellToken === nativeSymbol || !!tokenConfig[normalizedSellToken];
     // const supportedBuy = normalizedBuyToken === nativeSymbol || !!tokenConfig[normalizedBuyToken];
@@ -762,7 +769,8 @@ export async function POST(req: Request) {
           () => connectToDatabase()
         );
         const sellTokenPayload = {
-          amount,
+          amount: sellAmountRaw ?? amount,
+          decimals: sellDecimals,
           symbol: normalizedSellToken,
           contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
             ? tokenConfig[normalizedSellToken]?.address ?? null
@@ -778,13 +786,15 @@ export async function POST(req: Request) {
             gas: {
               token: gasFee?.token ?? '',
               amount: gasFee?.amount ?? '',
+              decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
             },
-            provider: { token: '', amount: '' },
-            altair: { token: '', amount: '' },
+            provider: { token: '', amount: '', decimals: null },
+            altair: { token: '', amount: '', decimals: null },
           },
         };
         const buyTokenPayload = {
-          amount: buyAmount,
+          amount: buyAmountRaw,
+          decimals: buyDecimals,
           symbol: normalizedBuyToken,
           contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
             ? tokenConfig[normalizedBuyToken]?.address ?? null
@@ -797,9 +807,9 @@ export async function POST(req: Request) {
           balanceBefore: buyBalanceBefore,
           balanceAfter: buyBalanceAfter,
           fees: {
-            gas: { token: '', amount: '' },
-            provider: { token: '', amount: '' },
-            altair: { token: '', amount: '' },
+            gas: { token: '', amount: '', decimals: null },
+            provider: { token: '', amount: '', decimals: null },
+            altair: { token: '', amount: '', decimals: null },
           },
         };
         const SID = await generateSwapID();
@@ -827,6 +837,7 @@ export async function POST(req: Request) {
               SID,
               UID: user.UID,
               CID,
+              provider,
               intentString: 'SINGLE_CHAIN_SWAP_INTENT',
               sellToken: sellTokenPayload,
               buyToken: buyTokenPayload,
@@ -857,7 +868,8 @@ export async function POST(req: Request) {
       }
         try {
           const sellTokenPayload = {
-            amount,
+            amount: sellAmountRaw ?? amount,
+            decimals: sellDecimals,
             symbol: normalizedSellToken,
             contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
               ? tokenConfig[normalizedSellToken]?.address ?? null
@@ -873,13 +885,15 @@ export async function POST(req: Request) {
               gas: {
                 token: gasFee?.token ?? '',
                 amount: gasFee?.amount ?? '',
+                decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
               },
-              provider: { token: '', amount: '' },
-              altair: { token: '', amount: '' },
+              provider: { token: '', amount: '', decimals: null },
+              altair: { token: '', amount: '', decimals: null },
             },
           };
           const buyTokenPayload = {
-            amount: buyAmount,
+            amount: buyAmountRaw,
+            decimals: buyDecimals,
             symbol: normalizedBuyToken,
             contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
               ? tokenConfig[normalizedBuyToken]?.address ?? null
@@ -892,9 +906,9 @@ export async function POST(req: Request) {
             balanceBefore: buyBalanceBefore,
             balanceAfter: buyBalanceAfter,
             fees: {
-              gas: { token: '', amount: '' },
-              provider: { token: '', amount: '' },
-              altair: { token: '', amount: '' },
+              gas: { token: '', amount: '', decimals: null },
+              provider: { token: '', amount: '', decimals: null },
+              altair: { token: '', amount: '', decimals: null },
             },
           };
           await withWaitLogger(
@@ -907,6 +921,7 @@ export async function POST(req: Request) {
               appendSwapToHistory({
                 accessToken,
                 CID,
+                provider,
                 intentString: 'SINGLE_CHAIN_SWAP_INTENT',
                 sellToken: sellTokenPayload,
                 buyToken: buyTokenPayload,

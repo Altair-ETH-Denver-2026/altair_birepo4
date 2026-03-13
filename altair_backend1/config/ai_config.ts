@@ -131,7 +131,7 @@ export const CHAT_BUTTON_ROW_TEMPLATES = {
     buttons: [
       {
         id: 'start-earning',
-        label: 'Start Earning with TOKEN',
+        label: 'Earn with TOKEN',
         action: {
           kind: 'RUN_LOCAL',
           actionId: 'START_EARNING',
@@ -140,7 +140,7 @@ export const CHAT_BUTTON_ROW_TEMPLATES = {
       },
       {
         id: 'learn-more',
-        label: 'Learn More About TOKEN',
+        label: 'Learn About TOKEN',
         action: {
           kind: 'RUN_LOCAL',
           actionId: 'LEARN_MORE',

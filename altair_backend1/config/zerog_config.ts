@@ -31,6 +31,7 @@ export const ZG_JSONS = {
         intentString: '', // intent classification for this swap/bridge
         sellToken: {
           amount: '',
+          decimals: 0,
           symbol: '',
           contractAddress: '',
           chain: '',
@@ -41,6 +42,7 @@ export const ZG_JSONS = {
         },
         buyToken: {
           amount: '',
+          decimals: 0,
           symbol: '',
           contractAddress: '',
           chain: '',

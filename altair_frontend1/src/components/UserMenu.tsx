@@ -92,6 +92,7 @@ export default function UserMenu() {
   const [tokenDropdownForceAll, setTokenDropdownForceAll] = useState<Record<number, boolean>>({});
   const [walletAddressCopyState, setWalletAddressCopyState] = useState<Record<string, boolean>>({});
   const walletAddressCopyTimers = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
+  const balanceOverrideRef = useRef<Record<string, { value: string; expiresAt: number }>>({});
   const executeSwap = useSwap(selectedChain);
   const executeSolanaSwap = useSolanaSwap(selectedChain);
   const executeSolanaTransfer = useSolanaTransfer(selectedChain);
@@ -258,26 +259,64 @@ export default function UserMenu() {
     },
     solanaAddressValue?: string | null,
   ) => {
+    const applyOverrides = (input: {
+      eth?: string;
+      usdc?: string;
+      weth?: string;
+      dai?: string;
+      sol?: string;
+      address?: string;
+      solanaAddress?: string;
+    }) => {
+      const now = Date.now();
+      const next = { ...input };
+      const symbolMap: Array<{ symbol: string; key: 'eth' | 'usdc' | 'weth' | 'dai' | 'sol' }> = [
+        { symbol: 'ETH', key: 'eth' },
+        { symbol: 'USDC', key: 'usdc' },
+        { symbol: 'WETH', key: 'weth' },
+        { symbol: 'DAI', key: 'dai' },
+        { symbol: 'SOL', key: 'sol' },
+      ];
+
+      symbolMap.forEach(({ symbol, key }) => {
+        const cacheKey = `${chainKey}:${symbol}`;
+        const override = balanceOverrideRef.current[cacheKey];
+        if (!override) return;
+        if (override.expiresAt <= now) {
+          delete balanceOverrideRef.current[cacheKey];
+          return;
+        }
+        next[key] = override.value;
+      });
+
+      return next;
+    };
+
+    const mergedSnapshot = applyOverrides(snapshot);
+
     setBalancesByChain((prev) => ({
       ...prev,
       [chainKey]: {
-        eth: snapshot.eth,
-        usdc: snapshot.usdc,
-        weth: snapshot.weth,
-        dai: snapshot.dai,
-        sol: snapshot.sol,
-        address: snapshot.address,
-        solanaAddress: solanaAddressValue ?? snapshot.solanaAddress,
+        ...(prev[chainKey] ?? {}),
+        ...(mergedSnapshot.eth !== undefined ? { eth: mergedSnapshot.eth } : {}),
+        ...(mergedSnapshot.usdc !== undefined ? { usdc: mergedSnapshot.usdc } : {}),
+        ...(mergedSnapshot.weth !== undefined ? { weth: mergedSnapshot.weth } : {}),
+        ...(mergedSnapshot.dai !== undefined ? { dai: mergedSnapshot.dai } : {}),
+        ...(mergedSnapshot.sol !== undefined ? { sol: mergedSnapshot.sol } : {}),
+        ...(mergedSnapshot.address !== undefined ? { address: mergedSnapshot.address } : {}),
+        ...((solanaAddressValue ?? mergedSnapshot.solanaAddress) !== undefined
+          ? { solanaAddress: solanaAddressValue ?? mergedSnapshot.solanaAddress }
+          : {}),
       },
     }));
     if (chainKey === selectedChain) {
-      if (snapshot.eth) setEthBalance(snapshot.eth);
-      if (snapshot.usdc) setUsdcBalance(snapshot.usdc);
-      if (snapshot.weth) setWethBalance(snapshot.weth);
-      if (snapshot.dai) setDaiBalance(snapshot.dai);
-      if (snapshot.sol) setSolBalance(snapshot.sol);
-      if (snapshot.address) setEvmAddress(snapshot.address);
-      if (solanaAddressValue) setSolanaAddress(solanaAddressValue);
+      if (mergedSnapshot.eth !== undefined) setEthBalance(mergedSnapshot.eth);
+      if (mergedSnapshot.usdc !== undefined) setUsdcBalance(mergedSnapshot.usdc);
+      if (mergedSnapshot.weth !== undefined) setWethBalance(mergedSnapshot.weth);
+      if (mergedSnapshot.dai !== undefined) setDaiBalance(mergedSnapshot.dai);
+      if (mergedSnapshot.sol !== undefined) setSolBalance(mergedSnapshot.sol);
+      if (mergedSnapshot.address !== undefined) setEvmAddress(mergedSnapshot.address);
+      if (solanaAddressValue !== undefined && solanaAddressValue !== null) setSolanaAddress(solanaAddressValue);
     }
   };
 
@@ -425,6 +464,72 @@ export default function UserMenu() {
   useClientEffect(() => {
     const controller = new AbortController();
 
+    const formatRawToHuman = (raw: string, decimals: number): string => {
+      try {
+        const value = BigInt(raw);
+        const isNegative = value < 0n;
+        const abs = isNegative ? -value : value;
+        const base = 10n ** BigInt(decimals);
+        const whole = abs / base;
+        const fraction = abs % base;
+        if (fraction === 0n) return `${isNegative ? '-' : ''}${whole.toString()}`;
+        const padded = fraction.toString().padStart(decimals, '0').replace(/0+$/, '');
+        return `${isNegative ? '-' : ''}${whole.toString()}.${padded}`;
+      } catch {
+        return '0';
+      }
+    };
+
+    const applyInstantBalanceUpdates = (updates: Array<{
+      chain: ChainKey;
+      symbol: string;
+      balanceAfterRaw: string | null;
+      decimals: number;
+    }>) => {
+      if (!updates.length) return;
+
+      const normalizeChainKey = (input: string): ChainKey | null => {
+        const raw = input.trim();
+        if (!raw) return null;
+        const upper = raw.toUpperCase();
+        if (upper in CHAINS) return upper as ChainKey;
+        const normalized = raw.toLowerCase().replace(/[\s_-]+/g, '');
+        if (normalized === 'solana' || normalized === 'solanamainnet') return 'SOLANA_MAINNET';
+        if (normalized === 'base' || normalized === 'basemainnet') return 'BASE_MAINNET';
+        if (normalized === 'basesepolia' || normalized === 'basesepoliatestnet') return 'BASE_SEPOLIA';
+        if (normalized === 'eth' || normalized === 'ethereum' || normalized === 'ethmainnet' || normalized === 'ethereummainnet') return 'ETH_MAINNET';
+        if (normalized === 'sepolia' || normalized === 'ethsepolia' || normalized === 'ethereumsepolia') return 'ETH_SEPOLIA';
+        return null;
+      };
+
+      const snapshotByChain: Record<string, Partial<{ eth: string; usdc: string; weth: string; dai: string; sol: string }>> = {};
+
+      updates.forEach((entry) => {
+        if (!entry.balanceAfterRaw || !entry.chain) return;
+        const chainKey = normalizeChainKey(entry.chain);
+        if (!chainKey) return;
+        const symbol = entry.symbol.trim().toUpperCase();
+        const human = formatRawToHuman(entry.balanceAfterRaw, entry.decimals);
+        balanceOverrideRef.current[`${chainKey}:${symbol}`] = {
+          value: human,
+          expiresAt: Date.now() + 25_000,
+        };
+        const bucket = (snapshotByChain[chainKey] ??= {});
+        if (symbol === 'ETH') bucket.eth = human;
+        if (symbol === 'USDC') bucket.usdc = human;
+        if (symbol === 'WETH') bucket.weth = human;
+        if (symbol === 'DAI') bucket.dai = human;
+        if (symbol === 'SOL' || symbol === 'WSOL') bucket.sol = human;
+      });
+
+      (Object.entries(snapshotByChain) as Array<[string, Partial<{ eth: string; usdc: string; weth: string; dai: string; sol: string }>]>).forEach(
+        ([chainKeyRaw, snapshot]) => {
+          const chainKey = chainKeyRaw as ChainKey;
+          applyBalanceSnapshot(chainKey, snapshot);
+        }
+      );
+    };
+
     const run = async ({ forceRefresh, chainKey }: { forceRefresh: boolean; chainKey: ChainKey }) => {
       if (!authenticated) {
         setEthBalance('0');
@@ -465,7 +570,20 @@ export default function UserMenu() {
     }
 
     const handleSwapComplete = (event: Event) => {
-      const detail = (event as CustomEvent).detail as { chain?: ChainKey } | undefined;
+      const detail = (event as CustomEvent).detail as {
+        chain?: ChainKey;
+        balanceUpdates?: Array<{
+          chain: ChainKey;
+          symbol: string;
+          balanceAfterRaw: string | null;
+          decimals: number;
+        }>;
+      } | undefined;
+
+      if (Array.isArray(detail?.balanceUpdates) && detail.balanceUpdates.length > 0) {
+        applyInstantBalanceUpdates(detail.balanceUpdates);
+      }
+
       if (detail?.chain && detail.chain !== selectedChain) return;
       void run({ forceRefresh: true, chainKey: selectedChain });
     };

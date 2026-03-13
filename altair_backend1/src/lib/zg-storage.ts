@@ -679,9 +679,11 @@ const SWAP_HISTORY_MAX = 100;
 
 export type SwapHistoryEntry = {
   CID?: string | null;
+  provider?: string | null;
   intentString?: string | null;
   sellToken: {
     amount: string;
+    decimals?: number | null;
     symbol: string;
     contractAddress: string | null;
     chain: string;
@@ -692,6 +694,7 @@ export type SwapHistoryEntry = {
   };
   buyToken: {
     amount: string;
+    decimals?: number | null;
     symbol: string;
     contractAddress: string | null;
     chain: string;
@@ -1068,6 +1071,7 @@ export async function getSwapHistory(
 
 type AppendSwapParams = Omit<GetMemoryParams, 'key'> & {
   CID?: string | null;
+  provider?: string | null;
   intentString?: string | null;
   sellToken: SwapHistoryEntry['sellToken'];
   buyToken: SwapHistoryEntry['buyToken'];
@@ -1076,10 +1080,11 @@ type AppendSwapParams = Omit<GetMemoryParams, 'key'> & {
 };
 
 export async function appendSwapToHistory(params: AppendSwapParams): Promise<ArchiveResult> {
-  const { CID, intentString, sellToken, buyToken, txHash, accessToken, timestamp } = params;
+  const { CID, provider, intentString, sellToken, buyToken, txHash, accessToken, timestamp } = params;
   if (ZG_VERBOSE) {
     console.log('[0G][swap-history] append start', {
       CID: CID ?? null,
+      provider: provider ?? null,
       intentString: intentString ?? null,
       sellToken,
       buyToken,
@@ -1115,6 +1120,7 @@ export async function appendSwapToHistory(params: AppendSwapParams): Promise<Arc
   }
   const entry: SwapHistoryEntry = {
     CID: CID ?? null,
+    provider: provider ?? null,
     intentString: intentString ?? null,
     sellToken,
     buyToken,

@@ -24,6 +24,7 @@ import { connectToDatabase } from '@/lib/db';
 import { cookies } from 'next/headers';
 import { withWaitLogger } from '@/lib/waitLogger';
 import { formatAmountFromRaw } from '@/lib/amounts';
+import { buildCorsHeaders } from '@/lib/appUrls';
 
 const ERC20_BALANCE_ABI = [
   {
@@ -129,6 +130,14 @@ const resolveSwapBalanceOverrides = (params: {
 };
 
 export async function POST(req: Request) {
+  const corsHeaders = buildCorsHeaders(req.headers.get('origin'));
+  const withCors = (init?: ResponseInit): ResponseInit => ({
+    ...(init ?? {}),
+    headers: {
+      ...((init?.headers as Record<string, string> | undefined) ?? {}),
+      ...corsHeaders,
+    },
+  });
   try {
     const {
       walletAddress: overrideAddress,
@@ -206,7 +215,7 @@ export async function POST(req: Request) {
           )
         : null);
       if (!resolvedSolanaAddress) {
-        return NextResponse.json({ error: 'Unable to resolve Solana wallet address' }, { status: 401 });
+        return NextResponse.json({ error: 'Unable to resolve Solana wallet address' }, withCors({ status: 401 }));
       }
 
       const rpcUrl = SOLANA_MAINNET.rpcUrls[0];
@@ -347,7 +356,7 @@ export async function POST(req: Request) {
                 weth: '0',
                 dai: '0',
                 sol: swapOverrides.sol ?? sol,
-              });
+              }, withCors());
             }
             const chainLabel = CHAIN_LABELS[resolvedChainKey];
             const chainBalances = {
@@ -383,7 +392,7 @@ export async function POST(req: Request) {
               weth: '0',
               dai: '0',
               sol,
-            });
+            }, withCors());
           }
           const updatePayload: Record<string, unknown> = {
             [`balances.${chainLabel}`]: chainBalances,
@@ -415,7 +424,7 @@ export async function POST(req: Request) {
         weth: '0',
         dai: '0',
         sol,
-      });
+      }, withCors());
     }
 
     const addressToQuery = (overrideAddress
@@ -431,7 +440,7 @@ export async function POST(req: Request) {
         : null)) as `0x${string}` | null;
 
     if (!addressToQuery) {
-      return NextResponse.json({ error: 'Unable to resolve wallet address' }, { status: 401 });
+      return NextResponse.json({ error: 'Unable to resolve wallet address' }, withCors({ status: 401 }));
     }
 
     const resolvedRpcUrls = resolveRpcUrls(chainConfig.rpcUrls);
@@ -447,7 +456,7 @@ export async function POST(req: Request) {
     const tokenConfig = tokenConfigs[resolvedChainKey];
 
     if (!('chainId' in chainConfig)) {
-      return NextResponse.json({ error: 'Unsupported EVM chain configuration' }, { status: 400 });
+      return NextResponse.json({ error: 'Unsupported EVM chain configuration' }, withCors({ status: 400 }));
     }
 
     const client = createPublicClient({
@@ -702,7 +711,7 @@ export async function POST(req: Request) {
               usdc: swapOverrides.usdc ?? usdc,
               weth: swapOverrides.weth ?? weth,
               dai: swapOverrides.dai ?? dai,
-            });
+            }, withCors());
           }
           const chainLabel = CHAIN_LABELS[resolvedChainKey];
           const chainBalances: Record<string, BalanceEntry[]> = {
@@ -761,7 +770,7 @@ export async function POST(req: Request) {
             usdc,
             weth,
             dai,
-          });
+          }, withCors());
         }
         const updatePayload: Record<string, unknown> = {
           [`balances.${chainLabel}`]: chainBalances,
@@ -794,10 +803,15 @@ export async function POST(req: Request) {
       usdc,
       weth,
       dai,
-    });
+    }, withCors());
   } catch (error) {
     console.error('Balance fetch error:', error);
     const message = error instanceof Error ? error.message : 'Unexpected error';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, withCors({ status: 500 }));
   }
+}
+
+export async function OPTIONS(req: Request) {
+  const headers = buildCorsHeaders(req.headers.get('origin'));
+  return new NextResponse(null, { status: 204, headers });
 }
