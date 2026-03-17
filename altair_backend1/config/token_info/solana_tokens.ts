@@ -137,3 +137,10 @@ export const TNSR = {
   address: 'TNSRxcUxoT9xBG3de7PiJyTDYu7kskLqcpddxnEJAS6',
   decimals: 6,
 };
+
+export const USDu = {
+  symbol: 'USDu',
+  name: 'USDu Unify Pay',
+  address: '9ckR7pPPvyPadACDTzLwK2ZAEeUJ3qGSnzPs8bVaHrSy',
+  decimals: 6,
+};

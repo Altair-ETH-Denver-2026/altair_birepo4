@@ -421,7 +421,7 @@ export async function POST(req: Request) {
             ])
         );
         if (userDoc?.balances && typeof userDoc.balances === 'object') {
-          balanceContext = userDoc.balances as Record<string, unknown>;
+          balanceContext = userDoc.balances as unknown as Record<string, unknown>;
         }
         if (!userFromMongo?.solAddress && typeof solanaAddress === 'string' && solanaAddress.length > 0) {
           await withWaitLogger(

@@ -319,9 +319,7 @@ export default function Chat() {
         selectedChain === 'SOLANA_MAINNET'
           ? { txHash: result as string, buyAmount: 'unknown' }
           : { txHash: result as string, buyAmount: 'unknown' };
-      const action = normalizedSell === 'ETH' && normalizedBuy === 'WETH'
-        ? 'wrapped'
-        : 'swapped';
+      const action = 'swapped';
       console.log('[ChatButtonRow] executeIntentNow swap success', {
         action,
         amount,

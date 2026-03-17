@@ -33,20 +33,6 @@ export const useRelay = () => {
   const { wallets: solanaWallets } = useSolanaWallets();
   const { signAndSendTransaction } = useSignAndSendTransaction();
 
-  const resolveBalanceFieldForSymbol = (symbol: string) => {
-    const normalized = symbol.trim().toUpperCase();
-    if (normalized.includes('USDC')) return 'usdc';
-    if (normalized.includes('WETH')) return 'weth';
-    if (normalized.includes('DAI')) return 'dai';
-    if (normalized === 'WSOL') return 'sol';
-    if (normalized === 'ETH') return 'eth';
-    if (normalized === 'SOL') return 'sol';
-    if (normalized === 'USDC') return 'usdc';
-    if (normalized === 'WETH') return 'weth';
-    if (normalized === 'DAI') return 'dai';
-    return null;
-  };
-
   const normalizeBalanceChainKey = (input: string): string => {
     const raw = input.trim();
     if (!raw) return input;
@@ -196,8 +182,8 @@ export const useRelay = () => {
   }): Promise<string | null> => {
     const { backendBaseUrl, chainKey, walletAddress, symbol, decimals, accessToken } = params;
     if (!walletAddress) return null;
-    const balanceField = resolveBalanceFieldForSymbol(symbol);
-    if (!balanceField) return null;
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!normalizedSymbol) return null;
     const normalizedChainKey = normalizeBalanceChainKey(chainKey);
 
     try {
@@ -231,7 +217,14 @@ export const useRelay = () => {
         return null;
       }
       const payload = (await response.json()) as Record<string, unknown>;
-      const humanAmount = payload?.[balanceField];
+      const tokens = payload?.tokens as Record<string, { balance?: unknown }> | undefined;
+      const tokenEntry = tokens?.[normalizedSymbol] ??
+        Object.values(tokens ?? {}).find((entry) => {
+          if (!entry || typeof entry !== 'object') return false;
+          const candidate = (entry as Record<string, unknown>).symbol;
+          return typeof candidate === 'string' && candidate.trim().toUpperCase() === normalizedSymbol;
+        });
+      const humanAmount = tokenEntry?.balance;
       if (typeof humanAmount === 'number' && Number.isFinite(humanAmount) && humanAmount >= 0) {
         return toBaseUnits(humanAmount.toString(), decimals);
       }
@@ -241,7 +234,7 @@ export const useRelay = () => {
           normalizedChainKey,
           walletAddress,
           symbol,
-          balanceField,
+          normalizedSymbol,
           payloadKeys: Object.keys(payload ?? {}),
         });
         return null;

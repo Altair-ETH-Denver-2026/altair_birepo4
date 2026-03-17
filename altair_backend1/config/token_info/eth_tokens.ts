@@ -104,8 +104,8 @@ export const OP = {
   decimals: 18,
 };
 
-export const SOL = {
-  symbol: 'SOL',
+export const WSOL = {
+  symbol: 'WSOL',
   name: 'Wormhole Solana',
   address: '0xD31a59c85aE9D8edEFeC411D448f90841571b89c',
   decimals: 9,

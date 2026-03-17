@@ -3,6 +3,8 @@ import { getPrivyUserFromAccessToken } from '@/lib/privy';
 import { generateUserID } from '@/lib/id';
 import { User } from '@/models/User';
 import { withWaitLogger } from '@/lib/waitLogger';
+import { ensureDefaultTokensInMongoDB } from '@/lib/balanceService';
+import { DEFAULT_TOKENS, type ChainKey } from '../../config/blockchain_config';
 
 type LinkedAccountSnapshot = {
   type: string;
@@ -167,7 +169,7 @@ export async function syncUserFromAccessToken(accessToken: string) {
   if (embeddedWalletId !== null && embeddedWalletId !== undefined) updateFields.embeddedWalletId = embeddedWalletId;
   if (profileImageUrl !== null && profileImageUrl !== undefined) updateFields.profileImageUrl = profileImageUrl;
 
-  return await withWaitLogger(
+  const result = await withWaitLogger(
     {
       file: 'altair_backend1/src/lib/users.ts',
       target: 'User.findOneAndUpdate',
@@ -185,6 +187,22 @@ export async function syncUserFromAccessToken(accessToken: string) {
         { upsert: true, new: true }
       )
   );
+
+  // Ensure default tokens are initialized in MongoDB for all chains
+  // This runs asynchronously in the background
+  if (result?.UID) {
+    const chains = Object.keys(DEFAULT_TOKENS) as ChainKey[];
+    for (const chainKey of chains) {
+      try {
+        await ensureDefaultTokensInMongoDB(result.UID, chainKey);
+      } catch (error) {
+        console.error(`Failed to ensure default tokens for chain ${chainKey}:`, error);
+        // Don't fail the whole sync if token initialization fails
+      }
+    }
+  }
+
+  return result;
 }
 
 export async function getUserUIDFromAccessToken(accessToken: string): Promise<string> {

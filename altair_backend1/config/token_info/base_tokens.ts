@@ -68,8 +68,8 @@ export const DEGEN = {
   decimals: 18,
 };
 
-export const SOL = {
-  symbol: 'SOL',
+export const WSOL = {
+  symbol: 'WSOL',
   name: 'Base-Wrapped Solana',
   address: '0x311935Cd80B76769bF2ecC9D8Ab7635b2139cf82',
   decimals: 9,

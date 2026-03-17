@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
-import { createPublicClient, http, formatEther, formatUnits } from 'viem';
+import { createPublicClient, http } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { BLOCKCHAIN, CHAINS, type ChainKey } from '../../../../config/blockchain_config';
+import { cookies } from 'next/headers';
+import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '../../../../config/blockchain_config';
 import {
   BASE_MAINNET,
   BASE_SEPOLIA,
@@ -11,18 +12,14 @@ import {
   SOLANA_MAINNET,
   resolveRpcUrls,
 } from '../../../../config/chain_info';
-import { USDC as BASE_USDC, WETH as BASE_WETH, DAI as BASE_DAI } from '../../../../config/token_info/base_tokens';
-import { USDC as BASE_SEPOLIA_USDC, WETH as BASE_SEPOLIA_WETH } from '../../../../config/token_info/base_testnet_sepolia_tokens';
-import { USDC as ETH_USDC, WETH as ETH_WETH, DAI as ETH_DAI } from '../../../../config/token_info/eth_tokens';
-import { USDC as ETH_SEPOLIA_USDC, WETH as ETH_SEPOLIA_WETH } from '../../../../config/token_info/eth_sepolia_testnet_tokens';
-import { SOL as SOLANA_SOL, USDC as SOLANA_USDC } from '../../../../config/token_info/solana_tokens';
+import type { ApiBalancesResponse, ApiTokenBalance } from '../../../../config/balance_types';
 import { getPrivyEvmWalletAddress, getPrivySolanaWalletAddress } from '@/lib/privy';
-import { syncUserFromAccessToken } from '@/lib/users';
-import { User } from '@/models/User';
-import { Swap } from '@/models/Swap';
-import { connectToDatabase } from '@/lib/db';
-import { cookies } from 'next/headers';
-import { withWaitLogger } from '@/lib/waitLogger';
+import {
+  getBalancesFromMongoDB,
+  updateBalancesInMongoDB,
+  type BalanceEntry,
+} from '@/lib/balanceService';
+import { getUserUIDFromAccessToken } from '@/lib/users';
 import { formatAmountFromRaw } from '@/lib/amounts';
 import { buildCorsHeaders } from '@/lib/appUrls';
 
@@ -45,88 +42,241 @@ const ERC20_BALANCE_ABI = [
 
 const NATIVE_EVM_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
 
-const CHAIN_LABELS: Record<ChainKey, string> = {
-  ETH_MAINNET: 'Ethereum',
-  ETH_SEPOLIA: 'Ethereum',
-  BASE_MAINNET: 'Base',
-  BASE_SEPOLIA: 'Base',
-  SOLANA_MAINNET: 'Solana',
-};
-
-type BalanceEntry = {
-  symbol: string;
-  name: string;
-  address: string;
-  decimals: number;
-  balance: string;
-};
-
-const buildBalanceEntry = (params: {
-  symbol: string;
-  name?: string | null;
-  address?: string | null;
-  decimals: number;
-  balance: string;
-}): BalanceEntry => ({
-  symbol: params.symbol,
-  name: params.name ?? params.symbol,
-  address: params.address ?? '',
-  decimals: params.decimals,
-  balance: params.balance,
+const toApiTokenBalance = (entry: BalanceEntry): ApiTokenBalance => ({
+  symbol: entry.symbol,
+  name: entry.name,
+  address: entry.address,
+  decimals: entry.decimals,
+  balanceRaw: entry.balance,
+  balance: formatAmountFromRaw(entry.balance, entry.decimals),
+  source: entry.source,
+  verifiedAt: entry.verifiedAt,
 });
 
-type SwapOverrideCacheEntry = {
-  expiresAt: number;
-  swap: Record<string, any> | null;
+export const fromMongoToPayload = (params: {
+  chain: ChainKey;
+  address: string;
+  mongoBalances: Record<string, BalanceEntry>;
+}): ApiBalancesResponse => {
+  const tokens: Record<string, ApiTokenBalance> = {};
+  Object.entries(params.mongoBalances).forEach(([symbol, entry]) => {
+    if (!entry || typeof entry !== 'object') return;
+    tokens[symbol.toUpperCase()] = toApiTokenBalance({
+      ...entry,
+      symbol: entry.symbol ?? symbol,
+      source: entry.source ?? 'mongo',
+    });
+  });
+
+  const now = Date.now();
+  return {
+    chain: params.chain,
+    tokens,
+    ...(params.chain === 'SOLANA_MAINNET' ? { solanaAddress: params.address } : { address: params.address }),
+    source: 'mongo',
+    verifiedAt: now,
+    timestamp: now,
+  };
 };
 
-const SWAP_OVERRIDE_TTL_MS = 20_000;
-const SWAP_OVERRIDE_MAX_AGE_MS = 3 * 60_000;
-const swapOverrideCache = new Map<string, SwapOverrideCacheEntry>();
+const chainInfoByKey = {
+  BASE_SEPOLIA,
+  ETH_SEPOLIA,
+  ETH_MAINNET,
+  BASE_MAINNET,
+  SOLANA_MAINNET,
+} as const;
 
-const buildSwapOverrideCacheKey = (uid: string, chainKey: ChainKey) => `${uid}:${chainKey}`;
-
-const resolveSwapBalanceOverrides = (params: {
+async function fetchBlockchainBalancesDynamic(params: {
   chainKey: ChainKey;
-  swap: Record<string, any> | null;
-  tokenConfig: { USDC?: typeof BASE_USDC; WETH?: typeof BASE_WETH; DAI?: typeof BASE_DAI };
-}): { eth?: string; usdc?: string; weth?: string; dai?: string; sol?: string } | null => {
-  const { chainKey, swap, tokenConfig } = params;
-  if (!swap) return null;
-  const candidates = [swap.sellToken, swap.buyToken].filter(Boolean);
+  walletAddress: string;
+  seedBalances: Record<string, BalanceEntry>;
+}): Promise<Record<string, BalanceEntry>> {
+  const { chainKey, walletAddress, seedBalances } = params;
+  const symbolSeed = Object.keys(seedBalances);
+  const nativeSymbol = GAS_TOKENS[chainKey]?.toUpperCase() ?? (chainKey === 'SOLANA_MAINNET' ? 'SOL' : 'ETH');
+  const tokenSymbols = Array.from(new Set([nativeSymbol, ...symbolSeed.map((s) => s.toUpperCase())]));
+  const output: Record<string, BalanceEntry> = {};
+
   if (chainKey === 'SOLANA_MAINNET') {
-    const overrides: { sol?: string; usdc?: string } = {};
-    for (const token of candidates) {
-      if (token?.chain !== chainKey || !token?.balanceAfter || !token?.symbol) continue;
-      const symbol = String(token.symbol).toUpperCase();
-      if (symbol === 'SOL') {
-        overrides.sol = formatAmountFromRaw(String(token.balanceAfter), SOLANA_SOL.decimals ?? 9);
+    const connection = new Connection(SOLANA_MAINNET.rpcUrls[0], 'confirmed');
+    const owner = new PublicKey(walletAddress);
+
+    for (const symbol of tokenSymbols) {
+      const seed = seedBalances[symbol] ?? seedBalances[symbol.toUpperCase()];
+      const seedDecimals = typeof seed?.decimals === 'number' ? seed.decimals : undefined;
+      const seedAddress = typeof seed?.address === 'string' ? seed.address : '';
+      const isNative = symbol === nativeSymbol;
+
+      if (isNative) {
+        const lamports = await connection.getBalance(owner);
+        output[symbol] = {
+          symbol,
+          name: seed?.name ?? symbol,
+          address: seedAddress,
+          decimals: seedDecimals ?? 9,
+          balance: lamports.toString(),
+          source: 'blockchain',
+          verifiedAt: Date.now(),
+        };
+        continue;
       }
-      if (symbol === 'USDC') {
-        overrides.usdc = formatAmountFromRaw(String(token.balanceAfter), SOLANA_USDC.decimals ?? 6);
+
+      if (!seedAddress) {
+        output[symbol] = {
+          symbol,
+          name: seed?.name ?? symbol,
+          address: '',
+          decimals: seedDecimals ?? 0,
+          balance: '0',
+          source: 'blockchain',
+          verifiedAt: Date.now(),
+        };
+        continue;
       }
+
+      let raw = '0';
+      let decimals = seedDecimals ?? 0;
+      try {
+        const mint = new PublicKey(seedAddress);
+        const accounts = await connection.getParsedTokenAccountsByOwner(owner, { mint });
+        const total = accounts.value.reduce((acc, tokenAccount) => {
+          const parsed = tokenAccount.account.data;
+          if (!('parsed' in parsed)) return acc;
+          const amount = parsed.parsed?.info?.tokenAmount?.amount ?? '0';
+          const next = BigInt(amount);
+          const parsedDecimals = parsed.parsed?.info?.tokenAmount?.decimals;
+          if (typeof parsedDecimals === 'number') decimals = parsedDecimals;
+          return acc + next;
+        }, 0n);
+        raw = total.toString();
+      } catch {
+        raw = '0';
+      }
+
+      output[symbol] = {
+        symbol,
+        name: seed?.name ?? symbol,
+        address: seedAddress,
+        decimals,
+        balance: raw,
+        source: 'blockchain',
+        verifiedAt: Date.now(),
+      };
     }
-    return Object.keys(overrides).length ? overrides : null;
+
+    return output;
   }
 
-  const overrides: { eth?: string; usdc?: string; weth?: string; dai?: string } = {};
-  for (const token of candidates) {
-    if (token?.chain !== chainKey || !token?.balanceAfter || !token?.symbol) continue;
-    const symbol = String(token.symbol).toUpperCase();
-    if (symbol === 'ETH') {
-      overrides.eth = formatAmountFromRaw(String(token.balanceAfter), 18);
+  const chainConfig = chainInfoByKey[chainKey];
+  if (!('chainId' in chainConfig)) {
+    return output;
+  }
+  const rpcUrls = resolveRpcUrls(chainConfig.rpcUrls);
+  const client = createPublicClient({
+    chain: {
+      ...baseSepolia,
+      id: chainConfig.chainId,
+      rpcUrls: { default: { http: rpcUrls }, public: { http: rpcUrls } },
+    },
+    transport: http(rpcUrls[0]),
+  });
+
+  const account = walletAddress as `0x${string}`;
+
+  for (const symbol of tokenSymbols) {
+    const seed = seedBalances[symbol] ?? seedBalances[symbol.toUpperCase()];
+    const isNative = symbol === nativeSymbol;
+    const seedAddress = typeof seed?.address === 'string' ? seed.address : '';
+    const tokenAddress = isNative ? NATIVE_EVM_ADDRESS : seedAddress;
+    const seedDecimals = typeof seed?.decimals === 'number' ? seed.decimals : undefined;
+
+    if (isNative) {
+      const nativeBalance = await client.getBalance({ address: account });
+      output[symbol] = {
+        symbol,
+        name: seed?.name ?? symbol,
+        address: tokenAddress,
+        decimals: seedDecimals ?? 18,
+        balance: nativeBalance.toString(),
+        source: 'blockchain',
+        verifiedAt: Date.now(),
+      };
+      continue;
     }
-    if (symbol === 'USDC' && tokenConfig.USDC?.decimals) {
-      overrides.usdc = formatAmountFromRaw(String(token.balanceAfter), tokenConfig.USDC.decimals);
+
+    if (!tokenAddress || tokenAddress === NATIVE_EVM_ADDRESS) {
+      output[symbol] = {
+        symbol,
+        name: seed?.name ?? symbol,
+        address: tokenAddress,
+        decimals: seedDecimals ?? 18,
+        balance: '0',
+        source: 'blockchain',
+        verifiedAt: Date.now(),
+      };
+      continue;
     }
-    if (symbol === 'WETH' && tokenConfig.WETH?.decimals) {
-      overrides.weth = formatAmountFromRaw(String(token.balanceAfter), tokenConfig.WETH.decimals);
-    }
-    if (symbol === 'DAI' && tokenConfig.DAI?.decimals) {
-      overrides.dai = formatAmountFromRaw(String(token.balanceAfter), tokenConfig.DAI.decimals);
+
+    try {
+      const [decimalsRaw, balanceRaw] = await Promise.all([
+        client.readContract({
+          address: tokenAddress as `0x${string}`,
+          abi: ERC20_BALANCE_ABI,
+          functionName: 'decimals',
+        }),
+        client.readContract({
+          address: tokenAddress as `0x${string}`,
+          abi: ERC20_BALANCE_ABI,
+          functionName: 'balanceOf',
+          args: [account],
+        }),
+      ]);
+
+      output[symbol] = {
+        symbol,
+        name: seed?.name ?? symbol,
+        address: tokenAddress,
+        decimals: Number(decimalsRaw),
+        balance: balanceRaw.toString(),
+        source: 'blockchain',
+        verifiedAt: Date.now(),
+      };
+    } catch {
+      output[symbol] = {
+        symbol,
+        name: seed?.name ?? symbol,
+        address: tokenAddress,
+        decimals: seedDecimals ?? 18,
+        balance: '0',
+        source: 'blockchain',
+        verifiedAt: Date.now(),
+      };
     }
   }
-  return Object.keys(overrides).length ? overrides : null;
+
+  return output;
+}
+
+const toResponseFromBlockchain = (params: {
+  chain: ChainKey;
+  address: string;
+  balances: Record<string, BalanceEntry>;
+}): ApiBalancesResponse => {
+  const now = Date.now();
+  const tokens: Record<string, ApiTokenBalance> = {};
+  Object.entries(params.balances).forEach(([symbol, entry]) => {
+    tokens[symbol.toUpperCase()] = toApiTokenBalance(entry);
+  });
+
+  return {
+    chain: params.chain,
+    tokens,
+    ...(params.chain === 'SOLANA_MAINNET' ? { solanaAddress: params.address } : { address: params.address }),
+    source: 'blockchain',
+    verifiedAt: now,
+    timestamp: now,
+  };
 };
 
 export async function POST(req: Request) {
@@ -138,676 +288,91 @@ export async function POST(req: Request) {
       ...corsHeaders,
     },
   });
+
   try {
     const {
       walletAddress: overrideAddress,
-      chain: chainKey,
+      chain,
       accessToken: bodyToken,
-      email,
-      phone,
-      evmAddress: bodyEvmAddress,
-      solanaAddress: bodySolanaAddress,
       forceRefresh,
-    } = (await req.json().catch(() => ({
-      walletAddress: undefined,
-      chain: undefined,
-      accessToken: undefined,
-      email: undefined,
-      phone: undefined,
-      evmAddress: undefined,
-      solanaAddress: undefined,
-      forceRefresh: undefined,
-    }))) as {
+    } = (await req.json().catch(() => ({}))) as {
       walletAddress?: string;
       chain?: ChainKey;
       accessToken?: string;
-      email?: string;
-      phone?: string;
-      evmAddress?: string;
-      solanaAddress?: string;
       forceRefresh?: boolean;
     };
 
-    // Prefer signed Privy token from cookie; fall back to body token, then override address
-    const cookieStore = await withWaitLogger(
-      {
-        file: 'altair_backend1/src/app/api/balances/route.ts',
-        target: 'cookies()',
-        description: 'read auth cookies',
-      },
-      () => cookies()
-    );
+    const cookieStore = await cookies();
     const cookieToken = cookieStore.get('privy-token')?.value;
     const tokenToVerify = cookieToken ?? bodyToken ?? null;
 
-    const chainConfigs = {
-      BASE_SEPOLIA,
-      ETH_SEPOLIA,
-      ETH_MAINNET,
-      BASE_MAINNET,
-      SOLANA_MAINNET,
-    } as const;
+    const resolvedChainKey: ChainKey = chain && chain in CHAINS ? chain : (BLOCKCHAIN as ChainKey);
 
-    const resolvedChainKey: ChainKey =
-      chainKey && chainKey in CHAINS ? chainKey : (BLOCKCHAIN as ChainKey);
+    const walletAddress = overrideAddress
+      ?? (resolvedChainKey === 'SOLANA_MAINNET'
+        ? (tokenToVerify ? await getPrivySolanaWalletAddress(tokenToVerify) : null)
+        : (tokenToVerify ? await getPrivyEvmWalletAddress(tokenToVerify) : null));
 
-    const chainConfig = chainConfigs[resolvedChainKey];
-
-    const hasEmail = typeof email === 'string' && email.length > 0;
-    const hasPhone = typeof phone === 'string' && phone.length > 0;
-    const hasEvmAddress = typeof bodyEvmAddress === 'string' && bodyEvmAddress.length > 0;
-    const hasSolanaAddress = typeof bodySolanaAddress === 'string' && bodySolanaAddress.length > 0;
-    const shouldForceRefresh = Boolean(forceRefresh);
-    const contactUpdate: Record<string, string | Date> = {};
-    if (hasEmail) contactUpdate.email = email;
-    if (hasPhone) contactUpdate.phone = phone;
-    if (hasEmail || hasPhone) contactUpdate.lastSeenAt = new Date();
-
-    if (resolvedChainKey === 'SOLANA_MAINNET') {
-      const resolvedSolanaAddress = overrideAddress ?? (tokenToVerify
-        ? await withWaitLogger(
-            {
-              file: 'altair_backend1/src/app/api/balances/route.ts',
-              target: 'getPrivySolanaWalletAddress',
-              description: 'resolve Solana wallet address',
-            },
-            () => getPrivySolanaWalletAddress(tokenToVerify)
-          )
-        : null);
-      if (!resolvedSolanaAddress) {
-        return NextResponse.json({ error: 'Unable to resolve Solana wallet address' }, withCors({ status: 401 }));
-      }
-
-      const rpcUrl = SOLANA_MAINNET.rpcUrls[0];
-      const connection = new Connection(rpcUrl, 'confirmed');
-      const owner = new PublicKey(resolvedSolanaAddress);
-
-      const solLamports = await withWaitLogger(
-        {
-          file: 'altair_backend1/src/app/api/balances/route.ts',
-          target: 'Solana getBalance',
-          description: 'SOL balance lookup',
-        },
-        () => connection.getBalance(owner)
-      );
-      const sol = (solLamports / 1_000_000_000).toString();
-      const solRaw = solLamports.toString();
-
-      let usdc = '0';
-      let usdcRaw = '0';
-      let usdcDecimals = SOLANA_USDC.decimals ?? 6;
-      try {
-        const usdcMint = new PublicKey(SOLANA_USDC.address);
-        const accounts = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/balances/route.ts',
-            target: 'Solana getParsedTokenAccountsByOwner',
-            description: 'USDC token accounts lookup',
-          },
-          () => connection.getParsedTokenAccountsByOwner(owner, { mint: usdcMint })
-        );
-        const first = accounts.value[0];
-        if (first?.account?.data && 'parsed' in first.account.data) {
-          const parsed = first.account.data.parsed as {
-            info?: { tokenAmount?: { uiAmountString?: string; amount?: string; decimals?: number } };
-          };
-          usdc = parsed?.info?.tokenAmount?.uiAmountString ?? '0';
-          usdcRaw = parsed?.info?.tokenAmount?.amount ?? '0';
-          if (typeof parsed?.info?.tokenAmount?.decimals === 'number') {
-            usdcDecimals = parsed.info.tokenAmount.decimals;
-          }
-        }
-      } catch (err) {
-        console.warn('Solana USDC balance fetch failed:', err);
-      }
-
-        if (tokenToVerify) {
-          try {
-            const user = await withWaitLogger(
-              {
-                file: 'altair_backend1/src/app/api/balances/route.ts',
-                target: 'syncUserFromAccessToken',
-                description: 'Privy + Mongo user sync',
-              },
-              () => syncUserFromAccessToken(tokenToVerify)
-            );
-            const swapCacheKey = buildSwapOverrideCacheKey(user.UID, resolvedChainKey);
-            let latestSwap = swapOverrideCache.get(swapCacheKey)?.swap ?? null;
-            const cacheExpiresAt = swapOverrideCache.get(swapCacheKey)?.expiresAt ?? 0;
-            const cacheFresh = cacheExpiresAt > Date.now();
-            if (!cacheFresh) {
-              await withWaitLogger(
-                {
-                  file: 'altair_backend1/src/app/api/balances/route.ts',
-                  target: 'connectToDatabase',
-                  description: 'MongoDB connection for swap lookup',
-                },
-                () => connectToDatabase()
-              );
-              const swapCutoff = new Date(Date.now() - SWAP_OVERRIDE_MAX_AGE_MS);
-              latestSwap = await withWaitLogger(
-                {
-                  file: 'altair_backend1/src/app/api/balances/route.ts',
-                  target: 'Swap.findOne',
-                  description: 'load latest swap for balance fast path',
-                },
-                () =>
-                  Swap.findOne({
-                    UID: user.UID,
-                    createdAt: { $gte: swapCutoff },
-                    $or: [
-                      { 'sellToken.chain': resolvedChainKey },
-                      { 'buyToken.chain': resolvedChainKey },
-                    ],
-                  })
-                    .sort({ createdAt: -1 })
-                    .lean()
-              );
-              swapOverrideCache.set(swapCacheKey, {
-                swap: latestSwap as Record<string, any> | null,
-                expiresAt: Date.now() + SWAP_OVERRIDE_TTL_MS,
-              });
-            }
-            const swapOverrides = resolveSwapBalanceOverrides({
-              chainKey: resolvedChainKey,
-              swap: latestSwap as Record<string, any> | null,
-              tokenConfig: {} as { USDC?: typeof BASE_USDC; WETH?: typeof BASE_WETH; DAI?: typeof BASE_DAI },
-            });
-            if (swapOverrides) {
-              const chainLabel = CHAIN_LABELS[resolvedChainKey];
-              const chainBalances = {
-                SOL: [
-                  buildBalanceEntry({
-                    symbol: 'SOL',
-                    name: SOLANA_SOL.name ?? 'Solana',
-                    address: SOLANA_SOL.address,
-                    decimals: SOLANA_SOL.decimals ?? 9,
-                    balance: solRaw,
-                  }),
-                ],
-                USDC: [
-                  buildBalanceEntry({
-                    symbol: 'USDC',
-                    name: SOLANA_USDC.name ?? 'USD Coin',
-                    address: SOLANA_USDC.address,
-                    decimals: usdcDecimals,
-                    balance: usdcRaw,
-                  }),
-                ],
-              };
-              const updatePayload: Record<string, unknown> = {
-                [`balances.${chainLabel}`]: chainBalances,
-                ...(hasEmail || hasPhone ? contactUpdate : {}),
-                ...(hasEvmAddress ? { evmAddress: bodyEvmAddress } : {}),
-                ...(hasSolanaAddress ? { solAddress: bodySolanaAddress } : {}),
-              };
-              void (async () => {
-                try {
-                  await connectToDatabase();
-                  await User.updateOne({ UID: user.UID }, { $set: updatePayload });
-                } catch (err) {
-                  console.warn('Solana balance async write failed:', err);
-                }
-              })();
-              return NextResponse.json({
-                address: resolvedSolanaAddress,
-                eth: '0',
-                usdc: swapOverrides.usdc ?? usdc,
-                weth: '0',
-                dai: '0',
-                sol: swapOverrides.sol ?? sol,
-              }, withCors());
-            }
-            const chainLabel = CHAIN_LABELS[resolvedChainKey];
-            const chainBalances = {
-              SOL: [
-                buildBalanceEntry({
-                  symbol: 'SOL',
-                name: SOLANA_SOL.name ?? 'Solana',
-                address: SOLANA_SOL.address,
-                decimals: SOLANA_SOL.decimals ?? 9,
-                balance: solRaw,
-              }),
-            ],
-            USDC: [
-              buildBalanceEntry({
-                symbol: 'USDC',
-                name: SOLANA_USDC.name ?? 'USD Coin',
-                address: SOLANA_USDC.address,
-                decimals: usdcDecimals,
-                balance: usdcRaw,
-              }),
-            ],
-          };
-          const existingBalances = (user as { balances?: Record<string, unknown> }).balances?.[chainLabel] ?? null;
-          const balancesChanged =
-            !existingBalances || JSON.stringify(existingBalances) !== JSON.stringify(chainBalances);
-          const shouldWriteBalances =
-            shouldForceRefresh || balancesChanged || hasEmail || hasPhone || hasEvmAddress || hasSolanaAddress;
-          if (!shouldWriteBalances) {
-            return NextResponse.json({
-              address: resolvedSolanaAddress,
-              eth: '0',
-              usdc,
-              weth: '0',
-              dai: '0',
-              sol,
-            }, withCors());
-          }
-          const updatePayload: Record<string, unknown> = {
-            [`balances.${chainLabel}`]: chainBalances,
-            ...(hasEmail || hasPhone ? contactUpdate : {}),
-            ...(hasEvmAddress ? { evmAddress: bodyEvmAddress } : {}),
-            ...(hasSolanaAddress ? { solAddress: bodySolanaAddress } : {}),
-          };
-          await withWaitLogger(
-            {
-              file: 'altair_backend1/src/app/api/balances/route.ts',
-              target: 'User.updateOne',
-              description: 'Mongo balances write (Solana)',
-            },
-            () =>
-              User.updateOne(
-                { UID: user.UID },
-                { $set: updatePayload }
-              )
-          );
-        } catch (updateErr) {
-          console.warn('Solana balance sync failed:', updateErr);
-        }
-      }
-
-      return NextResponse.json({
-        address: resolvedSolanaAddress,
-        eth: '0',
-        usdc,
-        weth: '0',
-        dai: '0',
-        sol,
-      }, withCors());
-    }
-
-    const addressToQuery = (overrideAddress
-      ?? (tokenToVerify
-        ? await withWaitLogger(
-            {
-              file: 'altair_backend1/src/app/api/balances/route.ts',
-              target: 'getPrivyEvmWalletAddress',
-              description: 'resolve EVM wallet address',
-            },
-            () => getPrivyEvmWalletAddress(tokenToVerify)
-          )
-        : null)) as `0x${string}` | null;
-
-    if (!addressToQuery) {
+    if (!walletAddress) {
       return NextResponse.json({ error: 'Unable to resolve wallet address' }, withCors({ status: 401 }));
     }
 
-    const resolvedRpcUrls = resolveRpcUrls(chainConfig.rpcUrls);
-    const primaryRpcUrl = resolvedRpcUrls[0];
-    const tokenConfigs: Record<ChainKey, { USDC?: typeof BASE_USDC; WETH?: typeof BASE_WETH; DAI?: typeof BASE_DAI }> = {
-      BASE_SEPOLIA: { USDC: BASE_SEPOLIA_USDC, WETH: BASE_SEPOLIA_WETH },
-      ETH_SEPOLIA: { USDC: ETH_SEPOLIA_USDC, WETH: ETH_SEPOLIA_WETH },
-      ETH_MAINNET: { USDC: ETH_USDC, WETH: ETH_WETH, DAI: ETH_DAI },
-      BASE_MAINNET: { USDC: BASE_USDC, WETH: BASE_WETH, DAI: BASE_DAI },
-      SOLANA_MAINNET: {},
-    } as const;
+    const uid = tokenToVerify
+      ? await getUserUIDFromAccessToken(tokenToVerify).catch(() => null)
+      : null;
+    const mongoBalances = uid
+      ? await getBalancesFromMongoDB(uid, resolvedChainKey)
+      : null;
 
-    const tokenConfig = tokenConfigs[resolvedChainKey];
+    const shouldForceRefresh = Boolean(forceRefresh);
 
-    if (!('chainId' in chainConfig)) {
-      return NextResponse.json({ error: 'Unsupported EVM chain configuration' }, withCors({ status: 400 }));
+    if (mongoBalances && !shouldForceRefresh) {
+      const immediatePayload = fromMongoToPayload({
+        chain: resolvedChainKey,
+        address: walletAddress,
+        mongoBalances,
+      });
+
+      if (uid) {
+        void (async () => {
+          try {
+            const verifiedBalances = await fetchBlockchainBalancesDynamic({
+              chainKey: resolvedChainKey,
+              walletAddress,
+              seedBalances: mongoBalances,
+            });
+            await updateBalancesInMongoDB(uid, resolvedChainKey, verifiedBalances, 'blockchain');
+          } catch (err) {
+            console.warn('[balances] async verification failed', err);
+          }
+        })();
+      }
+
+      return NextResponse.json(immediatePayload, withCors());
     }
 
-    const client = createPublicClient({
-      chain: {
-        ...baseSepolia,
-        id: chainConfig.chainId,
-        rpcUrls: { default: { http: resolvedRpcUrls }, public: { http: resolvedRpcUrls } },
-      },
-      transport: http(primaryRpcUrl),
+    const seed = mongoBalances ?? {};
+    const blockchainBalances = await fetchBlockchainBalancesDynamic({
+      chainKey: resolvedChainKey,
+      walletAddress,
+      seedBalances: seed,
     });
 
-    const ethBalanceRaw = await withWaitLogger(
-      {
-        file: 'altair_backend1/src/app/api/balances/route.ts',
-        target: 'EVM getBalance',
-        description: 'ETH balance lookup',
-      },
-      () => client.getBalance({ address: addressToQuery })
-    );
-    const eth = formatEther(ethBalanceRaw);
-    const ethRaw = ethBalanceRaw.toString();
-    let usdc = '0';
-    let weth = '0';
-    let dai = '0';
-    let usdcRaw = '0';
-    let wethRaw = '0';
-    let daiRaw = '0';
-    let usdcDecimals = tokenConfig?.USDC?.decimals ?? 6;
-    let wethDecimals = tokenConfig?.WETH?.decimals ?? 18;
-    let daiDecimals = tokenConfig?.DAI?.decimals ?? 18;
-
-    const usdcAddress = tokenConfig?.USDC?.address;
-    if (usdcAddress) {
-      try {
-        const [decimals, usdcBalanceRaw] = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/balances/route.ts',
-            target: 'EVM readContract',
-            description: 'USDC decimals + balance lookup',
-          },
-          () =>
-            Promise.all([
-              client.readContract({
-                address: usdcAddress as `0x${string}`,
-                abi: ERC20_BALANCE_ABI,
-                functionName: 'decimals',
-              }),
-              client.readContract({
-                address: usdcAddress as `0x${string}`,
-                abi: ERC20_BALANCE_ABI,
-                functionName: 'balanceOf',
-                args: [addressToQuery],
-              }),
-            ])
-        );
-
-        usdcDecimals = Number(decimals);
-        usdc = formatUnits(usdcBalanceRaw, usdcDecimals);
-        usdcRaw = usdcBalanceRaw.toString();
-      } catch (erc20Err) {
-        console.warn('USDC balance fetch failed, returning 0:', erc20Err);
-        usdc = '0';
-        usdcRaw = '0';
-      }
+    if (uid) {
+      void updateBalancesInMongoDB(uid, resolvedChainKey, blockchainBalances, 'blockchain');
     }
 
-    const wethAddress = tokenConfig?.WETH?.address;
-    if (wethAddress) {
-      try {
-        const [decimals, wethBalanceRaw] = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/balances/route.ts',
-            target: 'EVM readContract',
-            description: 'WETH decimals + balance lookup',
-          },
-          () =>
-            Promise.all([
-              client.readContract({
-                address: wethAddress as `0x${string}`,
-                abi: ERC20_BALANCE_ABI,
-                functionName: 'decimals',
-              }),
-              client.readContract({
-                address: wethAddress as `0x${string}`,
-                abi: ERC20_BALANCE_ABI,
-                functionName: 'balanceOf',
-                args: [addressToQuery],
-              }),
-            ])
-        );
+    const payload = toResponseFromBlockchain({
+      chain: resolvedChainKey,
+      address: walletAddress,
+      balances: blockchainBalances,
+    });
 
-        wethDecimals = Number(decimals);
-        weth = formatUnits(wethBalanceRaw, wethDecimals);
-        wethRaw = wethBalanceRaw.toString();
-      } catch (erc20Err) {
-        console.warn('WETH balance fetch failed, returning 0:', erc20Err);
-        weth = '0';
-        wethRaw = '0';
-      }
-    }
-
-    const daiAddress = tokenConfig?.DAI?.address;
-    if (daiAddress) {
-      try {
-        const [decimals, daiBalanceRaw] = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/balances/route.ts',
-            target: 'EVM readContract',
-            description: 'DAI decimals + balance lookup',
-          },
-          () =>
-            Promise.all([
-              client.readContract({
-                address: daiAddress as `0x${string}`,
-                abi: ERC20_BALANCE_ABI,
-                functionName: 'decimals',
-              }),
-              client.readContract({
-                address: daiAddress as `0x${string}`,
-                abi: ERC20_BALANCE_ABI,
-                functionName: 'balanceOf',
-                args: [addressToQuery],
-              }),
-            ])
-        );
-
-        daiDecimals = Number(decimals);
-        dai = formatUnits(daiBalanceRaw, daiDecimals);
-        daiRaw = daiBalanceRaw.toString();
-      } catch (erc20Err) {
-        console.warn('DAI balance fetch failed, returning 0:', erc20Err);
-        dai = '0';
-        daiRaw = '0';
-      }
-    }
-
-    if (tokenToVerify) {
-      try {
-          const user = await withWaitLogger(
-            {
-              file: 'altair_backend1/src/app/api/balances/route.ts',
-              target: 'syncUserFromAccessToken',
-              description: 'Privy + Mongo user sync',
-            },
-            () => syncUserFromAccessToken(tokenToVerify)
-          );
-          const swapCacheKey = buildSwapOverrideCacheKey(user.UID, resolvedChainKey);
-          let latestSwap = swapOverrideCache.get(swapCacheKey)?.swap ?? null;
-          const cacheExpiresAt = swapOverrideCache.get(swapCacheKey)?.expiresAt ?? 0;
-          const cacheFresh = cacheExpiresAt > Date.now();
-          if (!cacheFresh) {
-            await withWaitLogger(
-              {
-                file: 'altair_backend1/src/app/api/balances/route.ts',
-                target: 'connectToDatabase',
-                description: 'MongoDB connection for swap lookup',
-              },
-              () => connectToDatabase()
-            );
-            const swapCutoff = new Date(Date.now() - SWAP_OVERRIDE_MAX_AGE_MS);
-            latestSwap = await withWaitLogger(
-              {
-                file: 'altair_backend1/src/app/api/balances/route.ts',
-                target: 'Swap.findOne',
-                description: 'load latest swap for balance fast path',
-              },
-              () =>
-                Swap.findOne({
-                  UID: user.UID,
-                  createdAt: { $gte: swapCutoff },
-                  $or: [
-                    { 'sellToken.chain': resolvedChainKey },
-                    { 'buyToken.chain': resolvedChainKey },
-                  ],
-                })
-                  .sort({ createdAt: -1 })
-                  .lean()
-            );
-            swapOverrideCache.set(swapCacheKey, {
-              swap: latestSwap as Record<string, any> | null,
-              expiresAt: Date.now() + SWAP_OVERRIDE_TTL_MS,
-            });
-          }
-          const swapOverrides = resolveSwapBalanceOverrides({
-            chainKey: resolvedChainKey,
-            swap: latestSwap as Record<string, any> | null,
-            tokenConfig,
-          });
-          if (swapOverrides) {
-            const chainLabel = CHAIN_LABELS[resolvedChainKey];
-            const chainBalances: Record<string, BalanceEntry[]> = {
-              ETH: [
-                buildBalanceEntry({
-                  symbol: 'ETH',
-                  name: 'Ethereum',
-                  address: NATIVE_EVM_ADDRESS,
-                  decimals: 18,
-                  balance: ethRaw,
-                }),
-              ],
-            };
-            if (tokenConfig?.USDC?.address) {
-              chainBalances.USDC = [
-                buildBalanceEntry({
-                  symbol: 'USDC',
-                  name: tokenConfig.USDC.name ?? 'USD Coin',
-                  address: tokenConfig.USDC.address,
-                  decimals: usdcDecimals,
-                  balance: usdcRaw,
-                }),
-              ];
-            }
-            if (tokenConfig?.WETH?.address) {
-              chainBalances.WETH = [
-                buildBalanceEntry({
-                  symbol: 'WETH',
-                  name: tokenConfig.WETH.name ?? 'Wrapped Ether',
-                  address: tokenConfig.WETH.address,
-                  decimals: wethDecimals,
-                  balance: wethRaw,
-                }),
-              ];
-            }
-            if (tokenConfig?.DAI?.address) {
-              chainBalances.DAI = [
-                buildBalanceEntry({
-                  symbol: 'DAI',
-                  name: tokenConfig.DAI.name ?? 'Dai',
-                  address: tokenConfig.DAI.address,
-                  decimals: daiDecimals,
-                  balance: daiRaw,
-                }),
-              ];
-            }
-            const updatePayload: Record<string, unknown> = {
-              [`balances.${chainLabel}`]: chainBalances,
-              ...(hasEmail || hasPhone ? contactUpdate : {}),
-              ...(hasEvmAddress ? { evmAddress: bodyEvmAddress } : {}),
-              ...(hasSolanaAddress ? { solAddress: bodySolanaAddress } : {}),
-            };
-            void (async () => {
-              try {
-                await connectToDatabase();
-                await User.updateOne({ UID: user.UID }, { $set: updatePayload });
-              } catch (err) {
-                console.warn('EVM balance async write failed:', err);
-              }
-            })();
-            return NextResponse.json({
-              address: addressToQuery,
-              eth: swapOverrides.eth ?? eth,
-              usdc: swapOverrides.usdc ?? usdc,
-              weth: swapOverrides.weth ?? weth,
-              dai: swapOverrides.dai ?? dai,
-            }, withCors());
-          }
-          const chainLabel = CHAIN_LABELS[resolvedChainKey];
-          const chainBalances: Record<string, BalanceEntry[]> = {
-            ETH: [
-            buildBalanceEntry({
-              symbol: 'ETH',
-              name: 'Ethereum',
-              address: NATIVE_EVM_ADDRESS,
-              decimals: 18,
-              balance: ethRaw,
-            }),
-          ],
-        };
-        if (tokenConfig?.USDC?.address) {
-          chainBalances.USDC = [
-            buildBalanceEntry({
-              symbol: 'USDC',
-              name: tokenConfig.USDC.name ?? 'USD Coin',
-              address: tokenConfig.USDC.address,
-              decimals: usdcDecimals,
-              balance: usdcRaw,
-            }),
-          ];
-        }
-        if (tokenConfig?.WETH?.address) {
-          chainBalances.WETH = [
-            buildBalanceEntry({
-              symbol: 'WETH',
-              name: tokenConfig.WETH.name ?? 'Wrapped Ether',
-              address: tokenConfig.WETH.address,
-              decimals: wethDecimals,
-              balance: wethRaw,
-            }),
-          ];
-        }
-        if (tokenConfig?.DAI?.address) {
-          chainBalances.DAI = [
-            buildBalanceEntry({
-              symbol: 'DAI',
-              name: tokenConfig.DAI.name ?? 'Dai',
-              address: tokenConfig.DAI.address,
-              decimals: daiDecimals,
-              balance: daiRaw,
-            }),
-          ];
-        }
-        const existingBalances = (user as { balances?: Record<string, unknown> }).balances?.[chainLabel] ?? null;
-        const balancesChanged =
-          !existingBalances || JSON.stringify(existingBalances) !== JSON.stringify(chainBalances);
-        const shouldWriteBalances =
-          shouldForceRefresh || balancesChanged || hasEmail || hasPhone || hasEvmAddress || hasSolanaAddress;
-        if (!shouldWriteBalances) {
-          return NextResponse.json({
-            address: addressToQuery,
-            eth,
-            usdc,
-            weth,
-            dai,
-          }, withCors());
-        }
-        const updatePayload: Record<string, unknown> = {
-          [`balances.${chainLabel}`]: chainBalances,
-          ...(hasEmail || hasPhone ? contactUpdate : {}),
-          ...(hasEvmAddress ? { evmAddress: bodyEvmAddress } : {}),
-          ...(hasSolanaAddress ? { solAddress: bodySolanaAddress } : {}),
-        };
-        await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/balances/route.ts',
-            target: 'User.updateOne',
-            description: 'Mongo balances write (EVM)',
-          },
-          () =>
-            User.updateOne(
-              { UID: user.UID },
-              { $set: updatePayload }
-            )
-        );
-      } catch (updateErr) {
-        console.warn('EVM balance sync failed:', updateErr);
-      }
-    }
-
-    console.log('addressToQuery', addressToQuery);
-
-    return NextResponse.json({
-      address: addressToQuery,
-      eth,
-      usdc,
-      weth,
-      dai,
-    }, withCors());
+    return NextResponse.json(payload, withCors());
   } catch (error) {
-    console.error('Balance fetch error:', error);
+    console.error('[balances] error', error);
     const message = error instanceof Error ? error.message : 'Unexpected error';
-    return NextResponse.json({ error: message }, withCors({ status: 500 }));
+    return NextResponse.json({ error: message }, { status: 500, headers: buildCorsHeaders(req.headers.get('origin')) });
   }
 }
 
@@ -815,3 +380,4 @@ export async function OPTIONS(req: Request) {
   const headers = buildCorsHeaders(req.headers.get('origin'));
   return new NextResponse(null, { status: 204, headers });
 }
+
