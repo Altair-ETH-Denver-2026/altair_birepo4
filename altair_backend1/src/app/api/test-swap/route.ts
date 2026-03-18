@@ -23,14 +23,35 @@ import { connectToDatabase } from '@/lib/db';
 import { syncUserFromAccessToken } from '@/lib/users';
 import { withWaitLogger } from '@/lib/waitLogger';
 import { Swap } from '@/models/Swap';
+import { Chat } from '@/models/Chat';
 import { generateSwapID } from '@/lib/id';
 import { formatAmountFromRaw, parseAmountToRaw } from '@/lib/amounts';
 import { MONGODB_JSONS } from '../../../../config/mongodb_config';
 import { ZG_JSONS } from '../../../../config/zerog_config';
+import {
+  buildEvmTokenCacheKey,
+  getAlchemyTokenMetadataByAddress,
+  isEvmAddress,
+  normalizeEvmAddress,
+  searchAlchemyTokenAddressesBySymbol,
+} from '@/lib/alchemyTokens';
 
 type TokenInfo = { address: string; decimals: number; symbol?: string };
 
 type JupiterTokenInfo = { address: string; decimals: number; symbol?: string };
+
+type ResolvedEvmToken = {
+  address: string;
+  symbol: string;
+  decimals: number;
+  name?: string;
+  source: 'native' | 'config' | 'mongo-token-cache' | 'alchemy';
+};
+
+type ResolveEvmTokenResult =
+  | { kind: 'resolved'; token: ResolvedEvmToken }
+  | { kind: 'ambiguous'; candidates: ResolvedEvmToken[] }
+  | { kind: 'unresolved' };
 
 const resolveMongoTemplate = (key: 'chat' | 'swap'): Record<string, unknown> => {
   const configValue = MONGODB_JSONS[key];
@@ -42,6 +63,7 @@ const resolveMongoTemplate = (key: 'chat' | 'swap'): Record<string, unknown> => 
 };
 
 const ZEROX_ETH_PLACEHOLDER = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
+const ENABLE_EVM_DYNAMIC_TOKEN_RESOLUTION = process.env.ENABLE_EVM_DYNAMIC_TOKEN_RESOLUTION !== 'false';
 const QUOTE_CACHE_TTL_MS = 15_000;
 type QuoteCacheEntry<T> = { expiresAt: number; value: T };
 const quoteCache = new Map<string, QuoteCacheEntry<unknown>>();
@@ -92,8 +114,225 @@ const resolveRpcUrl = (rpcUrls: string[]) => {
   return resolved[0] ?? rpcUrls[0];
 };
 
-const resolveBuyTokenAddress = (tokenConfig: Record<string, TokenInfo>, buyToken: string): string => {
-  return buyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : tokenConfig[buyToken]?.address ?? '';
+const resolveBuyTokenAddress = (params: {
+  tokenConfig: Record<string, TokenInfo>;
+  buyToken: string;
+  resolvedEvmBuyTokenAddress?: string | null;
+}): string => {
+  const { tokenConfig, buyToken, resolvedEvmBuyTokenAddress } = params;
+  return buyToken === 'ETH'
+    ? ZEROX_ETH_PLACEHOLDER
+    : resolvedEvmBuyTokenAddress ?? tokenConfig[buyToken]?.address ?? '';
+};
+
+const EVM_CHAIN_IDS: Partial<Record<ChainKey, number>> = {
+  ETH_MAINNET: ETH_MAINNET.chainId,
+  ETH_SEPOLIA: ETH_SEPOLIA.chainId,
+  BASE_MAINNET: BASE_MAINNET.chainId,
+  BASE_SEPOLIA: BASE_SEPOLIA.chainId,
+};
+
+const isEvmChain = (chainKey: ChainKey): chainKey is Exclude<ChainKey, 'SOLANA_MAINNET'> => chainKey !== 'SOLANA_MAINNET';
+
+const resolveChainLabel = (chainKey: ChainKey) => {
+  switch (chainKey) {
+    case 'ETH_MAINNET':
+    case 'ETH_SEPOLIA':
+      return 'Ethereum';
+    case 'BASE_MAINNET':
+    case 'BASE_SEPOLIA':
+      return 'Base';
+    case 'SOLANA_MAINNET':
+      return 'Solana';
+    default:
+      return chainKey;
+  }
+};
+
+const toResolvedFromTokenDoc = (params: {
+  address: string;
+  symbol: string;
+  decimals: number;
+  source: ResolvedEvmToken['source'];
+  name?: string;
+}): ResolvedEvmToken => ({
+  address: normalizeEvmAddress(params.address),
+  symbol: params.symbol.trim().toUpperCase(),
+  decimals: params.decimals,
+  name: params.name,
+  source: params.source,
+});
+
+const findEvmTokensInCache = async (params: {
+  chainKey: ChainKey;
+  symbol?: string;
+  address?: string;
+}): Promise<ResolvedEvmToken[]> => {
+  const { chainKey, symbol, address } = params;
+  const chainId = EVM_CHAIN_IDS[chainKey];
+  if (!chainId) return [];
+  await connectToDatabase();
+
+  const query: Record<string, unknown> = {
+    chainId: String(chainId),
+  };
+
+  const normalizedAddress = address && isEvmAddress(address) ? normalizeEvmAddress(address) : null;
+  if (normalizedAddress) {
+    query.$or = [
+      { mint: normalizedAddress },
+      { mint: buildEvmTokenCacheKey(chainId, normalizedAddress) },
+    ];
+  } else if (symbol) {
+    query.symbol = new RegExp(`^${symbol.trim()}$`, 'i');
+  } else {
+    return [];
+  }
+
+  const docs = await Token.find(query).lean().limit(8);
+  return docs
+    .map((doc) => {
+      const rawMint = typeof doc?.mint === 'string' ? doc.mint : '';
+      const inferredAddress = rawMint.includes(':') ? rawMint.split(':')[1] : rawMint;
+      const outAddress = normalizeEvmAddress(inferredAddress);
+      const outSymbol = typeof doc?.symbol === 'string' && doc.symbol.trim() ? doc.symbol.trim().toUpperCase() : '';
+      const outDecimals = typeof doc?.decimals === 'number' ? doc.decimals : null;
+      if (!isEvmAddress(outAddress) || !outSymbol || outDecimals === null) return null;
+      return toResolvedFromTokenDoc({
+        address: outAddress,
+        symbol: outSymbol,
+        decimals: outDecimals,
+        name: typeof doc?.name === 'string' ? doc.name : undefined,
+        source: 'mongo-token-cache',
+      });
+    })
+    .filter((entry): entry is ResolvedEvmToken => Boolean(entry));
+};
+
+const saveEvmTokenToCache = async (params: {
+  chainKey: ChainKey;
+  token: ResolvedEvmToken;
+}) => {
+  const chainId = EVM_CHAIN_IDS[params.chainKey];
+  if (!chainId) return;
+  await connectToDatabase();
+  const cacheKey = buildEvmTokenCacheKey(chainId, params.token.address);
+  await Token.updateOne(
+    { mint: cacheKey },
+    {
+      $set: {
+        mint: cacheKey,
+        chain: resolveChainLabel(params.chainKey),
+        chainId: String(chainId),
+        symbol: params.token.symbol,
+        name: params.token.name ?? null,
+        decimals: params.token.decimals,
+        source: params.token.source,
+        lastFetchedAt: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+};
+
+const resolveEvmToken = async (params: {
+  chainKey: ChainKey;
+  symbolOrAddress: string;
+  tokenConfig: Record<string, TokenInfo>;
+}): Promise<ResolveEvmTokenResult> => {
+  const { chainKey, symbolOrAddress, tokenConfig } = params;
+  if (!isEvmChain(chainKey)) return { kind: 'unresolved' };
+  const normalizedInput = symbolOrAddress.trim();
+  const normalizedSymbol = normalizedInput.toUpperCase();
+
+  if (!normalizedInput) return { kind: 'unresolved' };
+  if (normalizedSymbol === 'ETH') {
+    return {
+      kind: 'resolved',
+      token: {
+        address: ZEROX_ETH_PLACEHOLDER,
+        symbol: 'ETH',
+        decimals: 18,
+        source: 'native',
+      },
+    };
+  }
+
+  const configured = tokenConfig[normalizedSymbol];
+  if (configured?.address && typeof configured.decimals === 'number') {
+    return {
+      kind: 'resolved',
+      token: {
+        address: normalizeEvmAddress(configured.address),
+        symbol: (configured.symbol ?? normalizedSymbol).toUpperCase(),
+        decimals: configured.decimals,
+        source: 'config',
+      },
+    };
+  }
+
+  if (isEvmAddress(normalizedInput)) {
+    const cached = await findEvmTokensInCache({ chainKey, address: normalizedInput });
+    if (cached.length > 0) return { kind: 'resolved', token: cached[0] };
+
+    if (!ENABLE_EVM_DYNAMIC_TOKEN_RESOLUTION) return { kind: 'unresolved' };
+
+    const metadata = await getAlchemyTokenMetadataByAddress({ chainKey, address: normalizedInput });
+    if (!metadata?.address || typeof metadata.decimals !== 'number') return { kind: 'unresolved' };
+    const token = toResolvedFromTokenDoc({
+      address: metadata.address,
+      symbol: metadata.symbol ?? normalizedInput,
+      decimals: metadata.decimals,
+      name: metadata.name,
+      source: 'alchemy',
+    });
+    await saveEvmTokenToCache({ chainKey, token });
+    return { kind: 'resolved', token };
+  }
+
+  const cachedBySymbol = await findEvmTokensInCache({ chainKey, symbol: normalizedSymbol });
+  const exactCached = cachedBySymbol.filter((t) => t.symbol === normalizedSymbol);
+  if (exactCached.length === 1) return { kind: 'resolved', token: exactCached[0] };
+  if (exactCached.length > 1) return { kind: 'ambiguous', candidates: exactCached.slice(0, 5) };
+
+  if (!ENABLE_EVM_DYNAMIC_TOKEN_RESOLUTION) return { kind: 'unresolved' };
+
+  const candidateAddresses = await searchAlchemyTokenAddressesBySymbol({ symbol: normalizedSymbol });
+  if (candidateAddresses.length === 0) return { kind: 'unresolved' };
+
+  const discovered: ResolvedEvmToken[] = [];
+  for (const address of candidateAddresses.slice(0, 8)) {
+    const metadata = await getAlchemyTokenMetadataByAddress({ chainKey, address });
+    if (!metadata?.address || typeof metadata.decimals !== 'number') continue;
+    discovered.push(
+      toResolvedFromTokenDoc({
+        address: metadata.address,
+        symbol: metadata.symbol ?? normalizedSymbol,
+        decimals: metadata.decimals,
+        name: metadata.name,
+        source: 'alchemy',
+      })
+    );
+  }
+
+  const deduped = Array.from(new Map(discovered.map((t) => [t.address, t])).values());
+  const exact = deduped.filter((t) => t.symbol === normalizedSymbol);
+
+  if (exact.length === 1) {
+    await saveEvmTokenToCache({ chainKey, token: exact[0] });
+    return { kind: 'resolved', token: exact[0] };
+  }
+  if (exact.length > 1) {
+    return { kind: 'ambiguous', candidates: exact.slice(0, 5) };
+  }
+
+  if (deduped.length === 1) {
+    await saveEvmTokenToCache({ chainKey, token: deduped[0] });
+    return { kind: 'resolved', token: deduped[0] };
+  }
+
+  if (deduped.length > 1) return { kind: 'ambiguous', candidates: deduped.slice(0, 5) };
+  return { kind: 'unresolved' };
 };
 
 
@@ -165,7 +404,7 @@ const resolveTokenDecimals = async (params: {
 }): Promise<number | null> => {
   const { chainKey, buyToken, buyTokenAddressOrMint, tokenConfig } = params;
   const normalizedBuy = buyToken.toUpperCase();
-  const addressOrMint = buyTokenAddressOrMint?.toLowerCase?.() ?? buyTokenAddressOrMint ?? null;
+  const addressOrMint = typeof buyTokenAddressOrMint === 'string' ? buyTokenAddressOrMint.trim() : null;
   try {
     await withWaitLogger(
       {
@@ -208,8 +447,9 @@ const resolveBuyAmount = async (params: {
   txHash: string;
   buyToken: string;
   recipient: string;
+  buyTokenAddressOrMint?: string | null;
 }): Promise<{ amountRaw: string; evmReceipt?: ethers.TransactionReceipt | null; solanaTx?: VersionedTransactionResponse | null }> => {
-  const { chainKey, txHash, buyToken, recipient } = params;
+  const { chainKey, txHash, buyToken, recipient, buyTokenAddressOrMint } = params;
   if (chainKey === 'SOLANA_MAINNET') {
     const tokenConfigs: Record<ChainKey, Record<string, TokenInfo>> = {
       BASE_SEPOLIA: buildTokenMap(BaseSepoliaTokens as Record<string, TokenInfo>),
@@ -331,7 +571,11 @@ const resolveBuyAmount = async (params: {
     SOLANA_MAINNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
   };
   const tokenConfig = applyTokenEnvOverrides(chainKey, tokenConfigs[chainKey]);
-  const buyTokenAddress = resolveBuyTokenAddress(tokenConfig, buyToken).toLowerCase();
+  const buyTokenAddress = resolveBuyTokenAddress({
+    tokenConfig,
+    buyToken,
+    resolvedEvmBuyTokenAddress: buyTokenAddressOrMint,
+  }).toLowerCase();
   if (!buyTokenAddress) {
     throw new Error(`Missing buy token address for ${buyToken}`);
   }
@@ -563,7 +807,7 @@ const applyTokenEnvOverrides = (chainKey: ChainKey, tokens: Record<string, Token
 
 export async function POST(req: Request) {
   try {
-    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID } = (await req
+    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody } = (await req
       .json()
       .catch(() => ({
         chain: null,
@@ -573,6 +817,7 @@ export async function POST(req: Request) {
         recipient: null,
         txHash: null,
         CID: null,
+        provider: null,
       }))) as {
       chain?: ChainKey | null;
       buyToken?: string | null;
@@ -581,6 +826,7 @@ export async function POST(req: Request) {
       recipient?: string | null;
       txHash?: string | null;
       CID?: string | null;
+      provider?: string | null;
     };
 
     const resolvedChainKey: ChainKey =
@@ -624,7 +870,88 @@ export async function POST(req: Request) {
     }
 
     const isSolana = resolvedChainKey === 'SOLANA_MAINNET';
+    const provider = typeof providerFromBody === 'string' && providerFromBody.trim().length > 0
+      ? providerFromBody.trim()
+      : isSolana
+        ? 'Jupiter'
+        : '0x';
     const nativeSymbol = isSolana ? 'SOL' : 'ETH';
+
+    let resolvedEvmSellToken: ResolvedEvmToken | null = null;
+    let resolvedEvmBuyToken: ResolvedEvmToken | null = null;
+    if (!isSolana && isEvmChain(resolvedChainKey)) {
+      const sellResolution = await withWaitLogger(
+        {
+          file: 'altair_backend1/src/app/api/test-swap/route.ts',
+          target: 'resolveEvmToken (sell)',
+          description: 'resolve EVM sell token from config/cache/alchemy',
+        },
+        () => resolveEvmToken({
+          chainKey: resolvedChainKey,
+          symbolOrAddress: normalizedSellToken,
+          tokenConfig,
+        })
+      );
+
+      if (sellResolution.kind === 'ambiguous') {
+        return NextResponse.json(
+          {
+            error: `Ambiguous sell token symbol: ${normalizedSellToken}`,
+            code: 'AMBIGUOUS_SELL_TOKEN',
+            chain: resolvedChainKey,
+            candidates: sellResolution.candidates,
+          },
+          { status: 400 }
+        );
+      }
+      if (sellResolution.kind === 'unresolved') {
+        return NextResponse.json(
+          {
+            error: `Unable to resolve sell token: ${normalizedSellToken}`,
+            code: 'UNRESOLVED_SELL_TOKEN',
+            chain: resolvedChainKey,
+          },
+          { status: 400 }
+        );
+      }
+      resolvedEvmSellToken = sellResolution.token;
+
+      const buyResolution = await withWaitLogger(
+        {
+          file: 'altair_backend1/src/app/api/test-swap/route.ts',
+          target: 'resolveEvmToken (buy)',
+          description: 'resolve EVM buy token from config/cache/alchemy',
+        },
+        () => resolveEvmToken({
+          chainKey: resolvedChainKey,
+          symbolOrAddress: normalizedBuyToken,
+          tokenConfig,
+        })
+      );
+
+      if (buyResolution.kind === 'ambiguous') {
+        return NextResponse.json(
+          {
+            error: `Ambiguous buy token symbol: ${normalizedBuyToken}`,
+            code: 'AMBIGUOUS_BUY_TOKEN',
+            chain: resolvedChainKey,
+            candidates: buyResolution.candidates,
+          },
+          { status: 400 }
+        );
+      }
+      if (buyResolution.kind === 'unresolved') {
+        return NextResponse.json(
+          {
+            error: `Unable to resolve buy token: ${normalizedBuyToken}`,
+            code: 'UNRESOLVED_BUY_TOKEN',
+            chain: resolvedChainKey,
+          },
+          { status: 400 }
+        );
+      }
+      resolvedEvmBuyToken = buyResolution.token;
+    }
     // const supportedSell = normalizedSellToken === nativeSymbol || !!tokenConfig[normalizedSellToken];
     // const supportedBuy = normalizedBuyToken === nativeSymbol || !!tokenConfig[normalizedBuyToken];
     // if (!isSolana && (!supportedBuy || !supportedSell)) {
@@ -660,6 +987,10 @@ export async function POST(req: Request) {
             txHash,
             buyToken: normalizedBuyToken,
             recipient,
+            buyTokenAddressOrMint:
+              resolvedChainKey === 'SOLANA_MAINNET'
+                ? tokenConfig[normalizedBuyToken]?.address ?? null
+                : resolvedEvmBuyToken?.address ?? null,
           })
       );
       const buyAmountRaw = buyAmountResult.amountRaw;
@@ -676,7 +1007,11 @@ export async function POST(req: Request) {
             buyTokenAddressOrMint:
               resolvedChainKey === 'SOLANA_MAINNET'
                 ? tokenConfig[normalizedBuyToken]?.address ?? null
-                : resolveBuyTokenAddress(tokenConfig, normalizedBuyToken),
+                : resolveBuyTokenAddress({
+                    tokenConfig,
+                    buyToken: normalizedBuyToken,
+                    resolvedEvmBuyTokenAddress: resolvedEvmBuyToken?.address ?? null,
+                  }),
             tokenConfig,
           })
       );
@@ -696,9 +1031,7 @@ export async function POST(req: Request) {
             buyTokenAddressOrMint:
               resolvedChainKey === 'SOLANA_MAINNET'
                 ? tokenConfig[normalizedSellToken]?.address ?? null
-                : normalizedSellToken === 'ETH'
-                  ? ZEROX_ETH_PLACEHOLDER
-                  : tokenConfig[normalizedSellToken]?.address ?? null,
+                : resolvedEvmSellToken?.address ?? null,
             tokenConfig,
           })
       );
@@ -761,13 +1094,14 @@ export async function POST(req: Request) {
           () => connectToDatabase()
         );
         const sellTokenPayload = {
-          amount,
+          amount: sellAmountRaw ?? amount,
+          decimals: sellDecimals,
           symbol: normalizedSellToken,
           contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
             ? tokenConfig[normalizedSellToken]?.address ?? null
             : normalizedSellToken === 'ETH'
               ? ZEROX_ETH_PLACEHOLDER
-              : tokenConfig[normalizedSellToken]?.address ?? null,
+              : resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? null,
           chain: resolvedChainKey,
           chainId: chainConfig.chainId,
           walletAddress: recipient,
@@ -777,33 +1111,34 @@ export async function POST(req: Request) {
             gas: {
               token: gasFee?.token ?? '',
               amount: gasFee?.amount ?? '',
+              decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
             },
-            provider: { token: '', amount: '' },
-            altair: { token: '', amount: '' },
+            provider: { token: '', amount: '', decimals: null },
+            altair: { token: '', amount: '', decimals: null },
           },
         };
         const buyTokenPayload = {
-          amount: buyAmount,
+          amount: buyAmountRaw,
+          decimals: buyDecimals,
           symbol: normalizedBuyToken,
           contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
             ? tokenConfig[normalizedBuyToken]?.address ?? null
-            : normalizedBuyToken === 'ETH'
-              ? ZEROX_ETH_PLACEHOLDER
-              : tokenConfig[normalizedBuyToken]?.address ?? null,
+            : resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? null,
           chain: resolvedChainKey,
           chainId: chainConfig.chainId,
           walletAddress: recipient,
           balanceBefore: buyBalanceBefore,
           balanceAfter: buyBalanceAfter,
           fees: {
-            gas: { token: '', amount: '' },
-            provider: { token: '', amount: '' },
-            altair: { token: '', amount: '' },
+            gas: { token: '', amount: '', decimals: null },
+            provider: { token: '', amount: '', decimals: null },
+            altair: { token: '', amount: '', decimals: null },
           },
         };
+        const SID = await generateSwapID();
         console.log('[test-swap] MongoDB swap data:')
         console.log({
-          SID: await generateSwapID(),
+          SID,
           UID: user.UID,
           CID,
           intentString: 'SINGLE_CHAIN_SWAP_INTENT',
@@ -822,9 +1157,10 @@ export async function POST(req: Request) {
           async () =>
             Swap.create({
               ...swapTemplate,
-              SID: await generateSwapID(),
+              SID,
               UID: user.UID,
               CID,
+              provider,
               intentString: 'SINGLE_CHAIN_SWAP_INTENT',
               sellToken: sellTokenPayload,
               buyToken: buyTokenPayload,
@@ -832,18 +1168,37 @@ export async function POST(req: Request) {
               timestamp: new Date().toISOString(),
             })
         );
+        await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/test-swap/route.ts',
+            target: 'Chat.updateOne',
+            description: 'mark chat intent as executed (swap writeback)',
+          },
+          () =>
+            Chat.updateOne(
+              { CID, UID: user.UID },
+              {
+                $set: {
+                  SID,
+                  intentString: 'SINGLE_CHAIN_SWAP_INTENT',
+                  intentExecuted: true,
+                },
+              }
+            )
+        );
       } catch (dbErr) {
         console.warn('[test-swap] swap db write failed', dbErr);
       }
         try {
           const sellTokenPayload = {
-            amount,
+            amount: sellAmountRaw ?? amount,
+            decimals: sellDecimals,
             symbol: normalizedSellToken,
             contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
               ? tokenConfig[normalizedSellToken]?.address ?? null
               : normalizedSellToken === 'ETH'
                 ? ZEROX_ETH_PLACEHOLDER
-                : tokenConfig[normalizedSellToken]?.address ?? null,
+                : resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? null,
             chain: resolvedChainKey,
             chainId: chainConfig.chainId,
             walletAddress: recipient,
@@ -853,28 +1208,28 @@ export async function POST(req: Request) {
               gas: {
                 token: gasFee?.token ?? '',
                 amount: gasFee?.amount ?? '',
+                decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
               },
-              provider: { token: '', amount: '' },
-              altair: { token: '', amount: '' },
+              provider: { token: '', amount: '', decimals: null },
+              altair: { token: '', amount: '', decimals: null },
             },
           };
           const buyTokenPayload = {
-            amount: buyAmount,
+            amount: buyAmountRaw,
+            decimals: buyDecimals,
             symbol: normalizedBuyToken,
             contractAddress: resolvedChainKey === 'SOLANA_MAINNET'
               ? tokenConfig[normalizedBuyToken]?.address ?? null
-              : normalizedBuyToken === 'ETH'
-                ? ZEROX_ETH_PLACEHOLDER
-                : tokenConfig[normalizedBuyToken]?.address ?? null,
+              : resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? null,
             chain: resolvedChainKey,
             chainId: chainConfig.chainId,
             walletAddress: recipient,
             balanceBefore: buyBalanceBefore,
             balanceAfter: buyBalanceAfter,
             fees: {
-              gas: { token: '', amount: '' },
-              provider: { token: '', amount: '' },
-              altair: { token: '', amount: '' },
+              gas: { token: '', amount: '', decimals: null },
+              provider: { token: '', amount: '', decimals: null },
+              altair: { token: '', amount: '', decimals: null },
             },
           };
           await withWaitLogger(
@@ -887,6 +1242,7 @@ export async function POST(req: Request) {
               appendSwapToHistory({
                 accessToken,
                 CID,
+                provider,
                 intentString: 'SINGLE_CHAIN_SWAP_INTENT',
                 sellToken: sellTokenPayload,
                 buyToken: buyTokenPayload,
@@ -1129,8 +1485,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unsupported EVM chain configuration' }, { status: 400 });
     }
 
-    const sellTokenInfo = normalizedSellToken === 'ETH' ? null : tokenConfig[normalizedSellToken];
-    const sellDecimals = sellTokenInfo?.decimals ?? 18;
+    const sellDecimals = resolvedEvmSellToken?.decimals ?? (normalizedSellToken === 'ETH' ? 18 : tokenConfig[normalizedSellToken]?.decimals ?? 18);
     const amountHuman = Number(amount);
     if (!Number.isFinite(amountHuman) || amountHuman <= 0) {
       return NextResponse.json({ error: 'Invalid amount' }, { status: 400 });
@@ -1138,11 +1493,21 @@ export async function POST(req: Request) {
     const sellAmountRaw = ethers.parseUnits(amountHuman.toString(), sellDecimals).toString();
 
     const zeroXApiKey = process.env.ZEROX_API_KEY;
-    const zeroXSellToken = normalizedSellToken === 'ETH' ? 'ETH' : tokenConfig[normalizedSellToken].address;
-    const zeroXBuyToken = normalizedBuyToken === 'ETH' ? 'ETH' : tokenConfig[normalizedBuyToken].address;
+    const zeroXSellToken = normalizedSellToken === 'ETH' ? 'ETH' : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? '');
+    const zeroXBuyToken = normalizedBuyToken === 'ETH' ? 'ETH' : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? '');
     const v2NativeToken = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
-    const zeroXV2SellToken = normalizedSellToken === 'ETH' ? v2NativeToken : tokenConfig[normalizedSellToken].address;
-    const zeroXV2BuyToken = normalizedBuyToken === 'ETH' ? v2NativeToken : tokenConfig[normalizedBuyToken].address;
+    const zeroXV2SellToken = normalizedSellToken === 'ETH' ? v2NativeToken : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? '');
+    const zeroXV2BuyToken = normalizedBuyToken === 'ETH' ? v2NativeToken : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? '');
+
+    if (!zeroXSellToken || !zeroXBuyToken || !zeroXV2SellToken || !zeroXV2BuyToken) {
+      return NextResponse.json(
+        {
+          error: `Unable to resolve token addresses for ${normalizedSellToken}/${normalizedBuyToken} on ${resolvedChainKey}.`,
+          code: 'UNRESOLVED_EVM_TOKEN_ADDRESS',
+        },
+        { status: 400 }
+      );
+    }
 
     const v1TestnetEndpoints: Partial<Record<ChainKey, string>> = {
       ETH_SEPOLIA: 'https://sepolia.api.0x.org/swap/v1/quote',
@@ -1330,7 +1695,8 @@ export async function POST(req: Request) {
       methodParameters,
       source: '0x',
       chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
-      sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : tokenConfig[normalizedSellToken].address,
+      sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
+      buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
     };
     return NextResponse.json(responseBody);
   } catch (error) {

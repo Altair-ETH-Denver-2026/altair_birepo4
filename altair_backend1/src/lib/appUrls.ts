@@ -30,6 +30,18 @@ const parseWildcardPrefix = (pattern: string) => {
   };
 };
 
+const isLocalDevOrigin = (origin: string) => {
+  const normalizedOrigin = normalizeUrl(origin);
+  if (!normalizedOrigin) return false;
+  try {
+    const parsed = new URL(normalizedOrigin);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1';
+  } catch {
+    return false;
+  }
+};
+
 const isAllowedOrigin = (origin: string) => {
   const normalizedOrigin = normalizeUrl(origin);
   if (!normalizedOrigin) return false;
@@ -57,6 +69,9 @@ const isAllowedOrigin = (origin: string) => {
 
 export const resolveFrontendOrigin = (requestOrigin?: string | null) => {
   const normalizedOrigin = normalizeUrl(requestOrigin ?? '');
+  if (normalizedOrigin && isLocalDevOrigin(normalizedOrigin)) {
+    return normalizedOrigin;
+  }
   if (normalizedOrigin && isAllowedOrigin(normalizedOrigin)) {
     return normalizedOrigin;
   }
@@ -88,6 +103,7 @@ export const buildCorsHeaders = (requestOrigin?: string | null) => {
     'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     'access-control-allow-headers': 'Content-Type, Authorization',
     'access-control-allow-credentials': 'true',
+    vary: 'Origin',
   };
   if (allowOrigin) {
     headers['access-control-allow-origin'] = allowOrigin;

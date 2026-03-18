@@ -16,6 +16,20 @@ const LinkedAccountSchema = new Schema(
   { _id: false }
 );
 
+// A single balance record for a token symbol (may have multiple entries per symbol to avoid collisions)
+const TokenBalanceEntrySchema = new Schema(
+  {
+    symbol: { type: String, required: true },
+    balance: { type: String, required: true }, // raw balance string
+    decimals: { type: Number, required: true },
+    name: { type: String },
+    address: { type: String },
+    verifiedAt: { type: Number }, // timestamp (ms) of last blockchain verification
+    source: { type: String, enum: ['cache', 'mongo', 'blockchain'], default: 'mongo' },
+  },
+  { _id: false }
+);
+
 const UserSchema = new Schema(
   {
     UID: { type: String, required: true, unique: true, index: true },
@@ -40,7 +54,17 @@ const UserSchema = new Schema(
     embeddedWalletId: { type: String },
     profileImageUrl: { type: String },
     linkedAccounts: { type: [LinkedAccountSchema], default: [] },
-    balances: { type: Schema.Types.Mixed, default: {} },
+    // balances: chainKey -> tokenSymbol -> BalanceEntry[]
+    // Outer Map keys: blockchain identifiers (e.g., 'SOLANA_MAINNET', 'ETH_MAINNET', 'BASE_MAINNET', etc.)
+    // Inner Map keys: token symbols (uppercase string)
+    balances: {
+      type: Map,
+      of: {
+        type: Map,
+        of: [TokenBalanceEntrySchema],
+      },
+      default: undefined,
+    },
     lastSeenAt: { type: Date },
   },
   {
