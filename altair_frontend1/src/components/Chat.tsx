@@ -327,6 +327,41 @@ export default function Chat() {
         buy: normalizedBuy,
       });
       return `Swap executed: ${action} ${amount} ${normalizedSell} for ${buyAmount} ${normalizedBuy}.\n${txHash}`;
+    } catch (swapErr) {
+      const err = swapErr as {
+        message?: string;
+        code?: string;
+        payload?: {
+          candidates?: Array<{ symbol?: string; address?: string; name?: string }>;
+        };
+      };
+      const code = typeof err?.code === 'string' ? err.code : '';
+      const candidates = Array.isArray(err?.payload?.candidates) ? err.payload.candidates : [];
+      if (
+        (code === 'AMBIGUOUS_SELL_TOKEN' || code === 'AMBIGUOUS_BUY_TOKEN') &&
+        selectedChain !== 'SOLANA_MAINNET' &&
+        candidates.length > 0
+      ) {
+        const lines = candidates.slice(0, 5).map((candidate) => {
+          const symbolText = typeof candidate?.symbol === 'string' ? candidate.symbol : '?';
+          const nameText = typeof candidate?.name === 'string' && candidate.name.trim().length > 0
+            ? ` (${candidate.name})`
+            : '';
+          const addressText = typeof candidate?.address === 'string' ? candidate.address : 'unknown-address';
+          return `- ${symbolText}${nameText}: ${addressText}`;
+        });
+        throw new Error(
+          [
+            typeof err?.message === 'string' && err.message.trim().length > 0
+              ? err.message
+              : 'Token symbol is ambiguous on this chain.',
+            'Specify the token contract address in your next message, for example:',
+            '"swap 10 <SELL_TOKEN_ADDRESS> to <BUY_TOKEN_ADDRESS> on base"',
+            ...lines,
+          ].join('\n')
+        );
+      }
+      throw swapErr;
     } finally {
       setIsExecutingSwap(false);
     }

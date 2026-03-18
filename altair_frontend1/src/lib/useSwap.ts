@@ -171,7 +171,18 @@ export const useSwap = (explicitChain?: ChainKey) => {
 
       if (!routeResponse.ok) {
         const errorPayload = await routeResponse.json().catch(() => ({}));
-        throw new Error(errorPayload?.error ?? 'Failed to fetch swap route');
+        const message = typeof errorPayload?.error === 'string'
+          ? errorPayload.error
+          : 'Failed to fetch swap route';
+        const err = new Error(message) as Error & {
+          code?: string;
+          payload?: unknown;
+          status?: number;
+        };
+        err.code = typeof errorPayload?.code === 'string' ? errorPayload.code : undefined;
+        err.payload = errorPayload;
+        err.status = routeResponse.status;
+        throw err;
       }
 
       const routePayload = (await routeResponse.json()) as {
