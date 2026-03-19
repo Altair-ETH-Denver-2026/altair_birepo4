@@ -163,6 +163,18 @@ export default function UserMenu() {
   const withdrawCancelHighlightColor = withdrawCancelButtonConfig.highlightColor ?? withdrawCancelButtonConfig.buttonColor;
   const withdrawCancelActiveColor = withdrawCancelButtonConfig.activeColor ?? withdrawCancelButtonConfig.buttonColor;
   const withdrawCancelActiveBorderColor = withdrawCancelButtonConfig.activeBorderColor ?? withdrawCancelButtonConfig.borderColor;
+  const menuButtonTextConfig = MENU_ICONS.buttonText ?? { fontSize: 13, fontName: 'sans-serif', fontColor: '#f3f4f6' };
+  const menuButtonTextFontSize = Number(menuButtonTextConfig.fontSize ?? 13);
+  const menuButtonTextFontFamily = menuButtonTextConfig.fontName ?? 'sans-serif';
+  const menuButtonTextFontColor = menuButtonTextConfig.fontColor ?? '#f3f4f6';
+  const networkOptions: ReadonlyArray<{ label: string; key: ChainKey }> = [
+    { label: 'ETH Mainnet', key: 'ETH_MAINNET' },
+    { label: 'Sepolia Testnet', key: 'ETH_SEPOLIA' },
+    { label: 'Base Mainnet', key: 'BASE_MAINNET' },
+    { label: 'Base Testnet', key: 'BASE_SEPOLIA' },
+    { label: 'Solana Mainnet', key: 'SOLANA_MAINNET' },
+  ];
+  const selectedNetworkLabel = networkOptions.find((option) => option.key === selectedChain)?.label ?? 'Network';
   const walletAddressButtonConfig = WALLET_DISPLAY.walletAddressButton ?? {
     activeDuration: 1.5,
     fontSize: 14,
@@ -1420,8 +1432,11 @@ export default function UserMenu() {
           title="Switch Chain"
           className="flex items-center justify-center rounded-full border-[var(--border-color)] hover:border-[var(--highlight-color)] transition-all shadow-md cursor-pointer"
           style={{
-            width: `${MENU_ICONS.size * 4 * 1.6}px`,
+            minWidth: `${MENU_ICONS.size * 4 * 1.6}px`,
             height: `${MENU_ICONS.size * 4 * 1.6}px`,
+            paddingLeft: `${MENU_ICONS.size * 1.5}px`,
+            paddingRight: `${MENU_ICONS.size * 2}px`,
+            gap: `${MENU_ICONS.size}px`,
             backgroundColor: MENU_ICONS.container_color,
             borderColor: isNetworkOpen ? MENU_ICONS.highlight_color : undefined,
             borderWidth: `${MENU_ICONS.border_width}px`,
@@ -1435,10 +1450,20 @@ export default function UserMenu() {
             style={{ width: `${MENU_ICONS.size * 4}px`, height: `${MENU_ICONS.size * 4}px` }}
             color={MENU_ICONS.icon_color}
           />
+          <span
+            className="whitespace-nowrap leading-none"
+            style={{
+              fontSize: `${menuButtonTextFontSize}px`,
+              fontFamily: menuButtonTextFontFamily,
+              color: menuButtonTextFontColor,
+            }}
+          >
+            {selectedNetworkLabel}
+          </span>
         </button>
         {isNetworkOpen && (
           <div className="absolute right-0 mt-3 w-48 rounded-xl bg-gray-900 border border-gray-700 shadow-2xl z-[100] overflow-hidden flex flex-col">
-            {[{ label: 'ETH Mainnet', key: 'ETH_MAINNET' as ChainKey }, { label: 'Sepolia Testnet', key: 'ETH_SEPOLIA' as ChainKey }, { label: 'Base Mainnet', key: 'BASE_MAINNET' as ChainKey }, { label: 'Base Testnet', key: 'BASE_SEPOLIA' as ChainKey }, { label: 'Solana Mainnet', key: 'SOLANA_MAINNET' as ChainKey }].map(({ label, key }) => {
+            {networkOptions.map(({ label, key }) => {
               const isSelected = key ? selectedChain === key : false;
               const handleClick = () => {
                 setSelectedChain(key);

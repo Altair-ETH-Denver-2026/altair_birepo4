@@ -196,6 +196,11 @@ export const MENU_ICONS = { // Top-right menu icon styling in UserMenu.tsx
   border_color: '#676869', // Icon button border color in UserMenu.tsx
   highlight_color: '#3b82f6', // Icon button active/hover border color in UserMenu.tsx
   border_width: 1, // Icon button border width in UserMenu.tsx
+  buttonText: {
+    fontSize: 14,
+    fontName: 'sans-serif',
+    fontColor: '#f3f4f6',
+  }
 };
 
 
