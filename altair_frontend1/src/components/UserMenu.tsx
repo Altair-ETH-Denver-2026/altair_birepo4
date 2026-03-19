@@ -163,6 +163,28 @@ export default function UserMenu() {
   const withdrawCancelHighlightColor = withdrawCancelButtonConfig.highlightColor ?? withdrawCancelButtonConfig.buttonColor;
   const withdrawCancelActiveColor = withdrawCancelButtonConfig.activeColor ?? withdrawCancelButtonConfig.buttonColor;
   const withdrawCancelActiveBorderColor = withdrawCancelButtonConfig.activeBorderColor ?? withdrawCancelButtonConfig.borderColor;
+  const walletAddressButtonConfig = WALLET_DISPLAY.walletAddressButton ?? {
+    activeDuration: 1.5,
+    fontSize: 14,
+    fontName: 'sans-serif',
+    fontColor: '#f3f4f6',
+    label: {
+      fontSize: 14,
+      fontName: 'sans-serif',
+      fontColor: '#d1d5db',
+    },
+  };
+  const walletAddressButtonFontSize = Number(walletAddressButtonConfig.fontSize ?? 14) * buttonSize;
+  const walletAddressButtonFontFamily = walletAddressButtonConfig.fontName ?? 'sans-serif';
+  const walletAddressButtonFontColor = walletAddressButtonConfig.fontColor ?? '#f3f4f6';
+  const walletAddressLabelConfig = walletAddressButtonConfig.label ?? {
+    fontSize: 14,
+    fontName: 'sans-serif',
+    fontColor: '#d1d5db',
+  };
+  const walletAddressLabelFontSize = Number(walletAddressLabelConfig.fontSize ?? 14) * buttonSize;
+  const walletAddressLabelFontFamily = walletAddressLabelConfig.fontName ?? 'sans-serif';
+  const walletAddressLabelFontColor = walletAddressLabelConfig.fontColor ?? '#d1d5db';
   const walletAddressCopyDurationMs = Math.max(
     0,
     Number(WALLET_DISPLAY.walletAddressButton?.activeDuration ?? 0) * 1000
@@ -1090,6 +1112,12 @@ export default function UserMenu() {
       buttonHeight={buttonHeight}
       buttonPaddingX={buttonPaddingX}
       buttonFontSize={buttonFontSize}
+      walletAddressButtonFontSize={walletAddressButtonFontSize}
+      walletAddressButtonFontFamily={walletAddressButtonFontFamily}
+      walletAddressButtonFontColor={walletAddressButtonFontColor}
+      walletAddressLabelFontSize={walletAddressLabelFontSize}
+      walletAddressLabelFontFamily={walletAddressLabelFontFamily}
+      walletAddressLabelFontColor={walletAddressLabelFontColor}
       topRowButtonColor={topRowButtonColor}
       topRowButtonBorderColor={topRowButtonBorderColor}
       topRowButtonHighlightColor={topRowButtonHighlightColor}
@@ -1595,7 +1623,16 @@ export default function UserMenu() {
                 paddingRight: `${containerPaddingRight}px`,
               }}
             >
-              <span className="text-sm text-gray-300 whitespace-nowrap">Wallet Address:</span>
+              <span
+                className="whitespace-nowrap"
+                style={{
+                  fontSize: `${walletAddressLabelFontSize}px`,
+                  fontFamily: walletAddressLabelFontFamily,
+                  color: walletAddressLabelFontColor,
+                }}
+              >
+                Wallet Address:
+              </span>
               <button
                 type="button"
                 onClick={() => {
@@ -1603,15 +1640,25 @@ export default function UserMenu() {
                   if (address) navigator.clipboard?.writeText(address).catch(() => {});
                 }}
                 title={resolveWalletAddress(walletDropdownChain) || 'Unknown'}
-                className="flex flex-1 min-w-0 items-center justify-center rounded-lg border border-gray-700 bg-gray-800/60 text-gray-100 leading-none hover:border-gray-500 hover:bg-gray-800 transition-colors cursor-pointer overflow-hidden"
+                className="flex flex-1 min-w-0 items-center justify-center rounded-lg border border-gray-700 bg-gray-800/60 leading-none hover:border-gray-500 hover:bg-gray-800 transition-colors cursor-pointer overflow-hidden"
                 style={{
                   height: `${buttonHeight}px`,
                   paddingLeft: `${buttonPaddingX / 2}px`,
                   paddingRight: `${buttonPaddingX / 2}px`,
-                  fontSize: `${buttonFontSize}px`,
+                  fontSize: `${walletAddressButtonFontSize}px`,
+                  fontFamily: walletAddressButtonFontFamily,
+                  color: walletAddressButtonFontColor,
                 }}
               >
-                <span className="flex h-full items-center text-right text-sm leading-none relative top-[1px] truncate" title={resolveWalletAddress(walletDropdownChain) || 'Unknown'}>
+                <span
+                  className="flex h-full items-center text-right leading-none relative top-[1px] truncate"
+                  style={{
+                    fontSize: `${walletAddressButtonFontSize}px`,
+                    fontFamily: walletAddressButtonFontFamily,
+                    color: walletAddressButtonFontColor,
+                  }}
+                  title={resolveWalletAddress(walletDropdownChain) || 'Unknown'}
+                >
                   {formatDisplayAddress(resolveWalletAddress(walletDropdownChain))}
                 </span>
                 <span className="flex w-4 justify-start ml-2">

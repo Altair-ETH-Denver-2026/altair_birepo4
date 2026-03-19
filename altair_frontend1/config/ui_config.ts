@@ -19,7 +19,7 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
   width: 270, // Panel/dropdown width in UserMenu.tsx
   paddingLeft: 14, // Left padding for wallet rows in UserMenu.tsx
   paddingRight: 8, // Right padding for wallet rows in UserMenu.tsx
-  buttonWidth: 27, // Button horizontal padding multiplier in UserMenu.tsx
+  buttonWidth: 25, // Button horizontal padding multiplier in UserMenu.tsx
   buttonHeight: 32, // Button height base in UserMenu.tsx
   buttonColor: 'rgba(31, 41, 55, 0.6)', // Default top-row button background (bg-gray-800/60) in UserMenu.tsx
   buttonBorderColor: '#374151', // Default top-row button border (border-gray-700) in UserMenu.tsx
@@ -56,7 +56,15 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
     fontName: 'sans-serif', // Close font family in UserMenu.tsx
   },
   walletAddressButton: {
-    activeDuration: 1.5
+    activeDuration: 1.5,
+    fontSize: 13,
+    fontName: 'sans-serif',
+    fontColor: '#f3f4f6',
+    label: {
+      fontSize: 14,
+      fontName: 'sans-serif',
+      fontColor: '#d1d5db'
+    }
   },
   chainDropdown: { // Wallet chain dropdown sizing in UserMenu.tsx
     width: 212, // Dropdown width in UserMenu.tsx
