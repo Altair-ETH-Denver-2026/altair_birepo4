@@ -9,6 +9,7 @@ import { useSolanaSwap } from '../lib/useSolanaSwap';
 import { useSolanaTransfer } from '../lib/useSolanaTransfer';
 import { withWaitLogger } from '../lib/waitLogger';
 import { usePanels } from '../lib/usePanels';
+import { getCachedPrivyAccessToken } from '../lib/privyTokenCache';
 import { PublicKey } from '@solana/web3.js';
 import { UserRound, LogOut, Settings, Wallet, Wrench, Copy, Globe2, Check } from 'lucide-react';
 import WalletPanel from './panels/WalletPanel';
@@ -26,7 +27,7 @@ import { normalizeBalancesResponse, resolveTokenRowsForChain } from '../lib/bala
 import { ADD_PANEL_DISPLAY, BALANCE_DECIMALS, MENU_ICONS, WALLET_CHAIN_LABELS, WALLET_CHAIN_OPTIONS, WALLET_DISPLAY } from '../../config/ui_config';
 
 export default function UserMenu() {
-  const { logout, authenticated } = usePrivy();
+  const { logout, authenticated, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
   const { wallets: solanaWallets } = useSolanaWallets();
   const { signAndSendTransaction } = useSignAndSendTransaction();
@@ -368,7 +369,12 @@ export default function UserMenu() {
   ) => {
     if (!authenticated) return;
 
-    const token = typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null;
+    let token: string | null = null;
+    try {
+      token = await getCachedPrivyAccessToken(getAccessToken);
+    } catch {
+      token = null;
+    }
     const cachedAddress = typeof window !== 'undefined' ? localStorage.getItem(cachedEvmKey) : null;
     const cachedSolana = typeof window !== 'undefined' ? localStorage.getItem(cachedSolKey) : null;
     const solanaAddressValue = chainKey === 'SOLANA_MAINNET'
@@ -410,7 +416,7 @@ export default function UserMenu() {
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify({
-              accessToken: token,
+              ...(token ? { accessToken: token } : {}),
               chain: chainKey,
               walletAddress: chainKey === 'SOLANA_MAINNET' ? solanaAddressValue ?? undefined : cachedAddress ?? undefined,
             }),

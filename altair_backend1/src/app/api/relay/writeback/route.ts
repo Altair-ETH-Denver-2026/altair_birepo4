@@ -119,7 +119,7 @@ export async function POST(req: Request) {
         target: 'syncUserFromAccessToken',
         description: 'Privy + Mongo user sync',
       },
-      () => syncUserFromAccessToken(accessToken)
+      () => syncUserFromAccessToken(accessToken, { mode: 'runtime' })
     );
 
     await withWaitLogger(

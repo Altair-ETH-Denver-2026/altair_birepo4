@@ -13,7 +13,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing Privy access token' }, { status: 401 });
     }
 
-    const result = await syncUserFromAccessToken(accessToken);
+    const result = await syncUserFromAccessToken(accessToken, { mode: 'login' });
 
     return NextResponse.json({ user: result });
   } catch (error) {
