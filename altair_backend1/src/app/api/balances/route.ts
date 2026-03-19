@@ -19,7 +19,7 @@ import {
   updateBalancesInMongoDB,
   type BalanceEntry,
 } from '@/lib/balanceService';
-import { getUserUIDFromAccessToken } from '@/lib/users';
+import { getUserUIDFromAccessTokenByMode } from '@/lib/users';
 import { formatAmountFromRaw } from '@/lib/amounts';
 import { buildCorsHeaders } from '@/lib/appUrls';
 
@@ -304,7 +304,7 @@ export async function POST(req: Request) {
 
     const cookieStore = await cookies();
     const cookieToken = cookieStore.get('privy-token')?.value;
-    const tokenToVerify = cookieToken ?? bodyToken ?? null;
+    const tokenToVerify = bodyToken ?? cookieToken ?? null;
 
     const resolvedChainKey: ChainKey = chain && chain in CHAINS ? chain : (BLOCKCHAIN as ChainKey);
 
@@ -318,7 +318,7 @@ export async function POST(req: Request) {
     }
 
     const uid = tokenToVerify
-      ? await getUserUIDFromAccessToken(tokenToVerify).catch(() => null)
+      ? await getUserUIDFromAccessTokenByMode(tokenToVerify, 'login').catch(() => null)
       : null;
     const mongoBalances = uid
       ? await getBalancesFromMongoDB(uid, resolvedChainKey)

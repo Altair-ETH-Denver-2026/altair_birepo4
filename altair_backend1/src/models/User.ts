@@ -32,7 +32,7 @@ const TokenBalanceEntrySchema = new Schema(
 
 const UserSchema = new Schema(
   {
-    UID: { type: String, required: true, unique: true, index: true },
+    UID: { type: String, required: true, unique: true, index: true, immutable: true },
     privyUserId: { type: String, required: true, unique: true, index: true },
     email: { type: String, index: true },
     phone: { type: String, index: true },

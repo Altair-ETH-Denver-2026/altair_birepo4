@@ -1062,7 +1062,7 @@ export async function POST(req: Request) {
             target: 'syncUserFromAccessToken',
             description: 'Privy + Mongo user sync',
           },
-          () => syncUserFromAccessToken(accessToken)
+          () => syncUserFromAccessToken(accessToken, { mode: 'runtime' })
         );
         const userBalances = (user as { balances?: Record<string, unknown> }).balances;
         sellBalanceBefore = resolveBalanceBefore({

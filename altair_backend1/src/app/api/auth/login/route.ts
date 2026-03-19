@@ -20,7 +20,7 @@ export async function POST(req: Request) {
         target: 'syncUserFromAccessToken',
         description: 'Privy + Mongo user sync',
       },
-      () => syncUserFromAccessToken(accessToken)
+      () => syncUserFromAccessToken(accessToken, { mode: 'createAccount' })
     );
 
     const hasEmail = typeof body.email === 'string' && body.email.length > 0;

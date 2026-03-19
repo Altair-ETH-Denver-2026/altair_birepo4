@@ -171,12 +171,16 @@ export async function updateBalancesInMongoDB(
       },
       () => User.updateOne(
         { UID: uid },
-        { $set: updateData },
-        { upsert: true }
+        { $set: updateData }
       )
     );
 
-    return result.modifiedCount > 0 || result.upsertedCount > 0;
+    if (result.matchedCount === 0) {
+      console.warn(`[balances] skipped balance update; user not found for UID ${uid}`);
+      return false;
+    }
+
+    return result.modifiedCount > 0;
   } catch (error) {
     console.error('Error updating balances in MongoDB:', error);
     return false;

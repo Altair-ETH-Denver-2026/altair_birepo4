@@ -367,7 +367,7 @@ export async function POST(req: Request) {
             target: 'syncUserFromAccessToken',
             description: 'Privy + Mongo user sync',
           },
-          () => syncUserFromAccessToken(resolvedAccessToken)
+          () => syncUserFromAccessToken(resolvedAccessToken, { mode: 'runtime' })
         );
         syncedUser = userFromMongo;
         await withWaitLogger(
@@ -615,7 +615,7 @@ export async function POST(req: Request) {
           target: 'syncUserFromAccessToken',
           description: 'Privy + Mongo user sync',
         },
-        () => syncUserFromAccessToken(resolvedAccessToken)
+        () => syncUserFromAccessToken(resolvedAccessToken, { mode: 'runtime' })
       );
       const chatTemplate = resolveMongoTemplate('chat');
       const chatEntry = {
