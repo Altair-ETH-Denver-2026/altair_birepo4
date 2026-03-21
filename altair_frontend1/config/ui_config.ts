@@ -150,6 +150,109 @@ export const WALLET_CHAIN_OPTIONS = [ // Wallet chain dropdown options in UserMe
   { key: 'SOLANA_MAINNET', label: 'Solana Mainnet' }, // Solana mainnet option in UserMenu.tsx dropdowns
 ] as const; // Preserve literal types for UserMenu.tsx type inference
 
+export const CHAIN_OPTIONS = {
+  enableTestnets: true, // Toggles display of testnets
+  enableMainnets: true, // Toggles display of mainnets
+
+  // Ethereum
+  ETH_MAINNET: {
+    enabled: true, // Toggles display
+    isTestnet: false, // Indicates if chain is testnet
+    activeNetwork: { // Refers to the primary chain dropdown that lets users set an "active chain" for the LLM to assume the user wants to use if they don't mention a chain
+      dropdownLabel: 'Ethereum', // How this chain appears in the dropdown
+      selectedLabel: 'Ethereum', // How this chain appears on the button after being selected
+    },
+    walletDisplay: { // Refers to the chain dropdown that appears at the top of wallet UIs such as WALLET_PANELs and the WALLET_DROPDOWN
+      dropdownLabel: 'Ethereum', // How this chain appears in the dropdown
+      selectedLabel: 'Ethereum Wallet', // How this chain appears on the button after being selected
+    }
+  },
+
+  // Ethereum Sepolia Testnet
+  ETH_SEPOLIA: {
+    enabled: true,
+    isTestnet: true,
+    activeNetwork: {
+      dropdownLabel: 'Ethereum Sepolia Testnet',
+      selectedLabel: 'Ethereum Sepolia Testnet',
+    },
+    walletDisplay: {
+      dropdownLabel: 'Ethereum Sepolia Testnet',
+      selectedLabel: 'Ethereum Testnet',
+    }
+  },
+
+  // Base
+  BASE_MAINNET: {
+    enabled: true,
+    isTestnet: false,
+    activeNetwork: {
+      dropdownLabel: 'Base',
+      selectedLabel: 'Base',
+    },
+    walletDisplay: {
+      dropdownLabel: 'Base',
+      selectedLabel: 'Base Wallet',
+    }
+  },
+
+  // Base Sepolia Testnet
+  BASE_SEPOLIA: {
+    enabled: true,
+    isTestnet: true,
+    activeNetwork: {
+      dropdownLabel: 'Base Sepolia Testnet',
+      selectedLabel: 'Base Sepolia Testnet',
+    },
+    walletDisplay: {
+      dropdownLabel: 'Base Sepolia Testnet',
+      selectedLabel: 'Base Testnet',
+    }
+  },
+
+  // Solana
+  SOLANA_MAINNET: {
+    enabled: true,
+    isTestnet: false,
+    activeNetwork: {
+      dropdownLabel: 'Solana',
+      selectedLabel: 'Solana',
+    },
+    walletDisplay: {
+      dropdownLabel: 'Solana',
+      selectedLabel: 'Solana Wallet',
+    }
+  },
+
+  // Solana Devnet
+  SOLANA_DEVNET: {
+    enabled: true,
+    isTestnet: true,
+    activeNetwork: {
+      dropdownLabel: 'Solana Devnet',
+      selectedLabel: 'Solana Devnet',
+    },
+    walletDisplay: {
+      dropdownLabel: 'Solana Devnet',
+      selectedLabel: 'Solana Devnet',
+    }
+  },
+
+  // All Chains
+  ALL_CHAINS: {
+    enabled: true,
+    isTestnet: false,
+    activeNetwork: {
+      dropdownLabel: false,
+      selectedLabel: false,
+    },
+    walletDisplay: {
+      dropdownLabel: 'All Chains',
+      selectedLabel: 'All Chains',
+    }
+  }
+};
+
 export const ADD_PANEL_DISPLAY = { // ADD_PANEL sizing, label, and icon styles in UserMenu.tsx
   logo: false,
   width: 270, // ADD_PANEL width in UserMenu.tsx

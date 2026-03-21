@@ -21,6 +21,7 @@ export const CHAINS = {
   ETH_MAINNET: 'ETH_MAINNET', // Ethereum mainnet key for production routing and swaps
   BASE_MAINNET: 'BASE_MAINNET', // Base mainnet key for production routing and swaps
   SOLANA_MAINNET: 'SOLANA_MAINNET', // Solana mainnet key for Solana-specific swap logic
+  SOLANA_DEVNET: 'SOLANA_DEVNET',
 } as const;
 
 export type ChainKey = keyof typeof CHAINS; // union of supported chain identifiers for backend logic
@@ -50,10 +51,11 @@ export const FORCE_QUERY_CHAINS = {
   }
 };
 
-export const DEFAULT_TOKENS = {
+export const DEFAULT_TOKENS = { // These are added when a user creates their account
   ETH_MAINNET: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
   ETH_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
   BASE_MAINNET: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
   BASE_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
   SOLANA_MAINNET: ['SOL', 'WETH', 'WBTC', 'USDC', 'USDu'],
+  SOLANA_DEVNET: ['SOL', 'WETH', 'WBTC', 'USDC', 'USDu'],
 };
