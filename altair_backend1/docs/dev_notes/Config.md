@@ -24,7 +24,7 @@ This project centralizes runtime and UI configuration in the root-level [`config
 - `BASE_SEPOLIA`, `ETH_SEPOLIA`, `ETH_MAINNET`, `BASE_MAINNET`: each contains:
   - `chainId`
   - `rpcUrls` (array; Alchemy first)
-  - `scanUrl`
+  - `explorerUrl`
   - `uniswapAddresses` (`router`, `factory`, `swapRouter`)
 - `resolveRpcUrls(rpcUrls)`: replaces `ALCHEMY_API_KEY` placeholder using env vars.
 

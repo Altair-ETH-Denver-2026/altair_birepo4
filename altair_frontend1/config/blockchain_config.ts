@@ -32,6 +32,7 @@ export const GAS_RESERVES = {
   ETH_MAINNET: '0.01',
   BASE_MAINNET: '0.0005',
   SOLANA_MAINNET: '0.02',
+  SOLANA_DEVNET: '0.01',
 };
 
 export const GAS_TOKENS = {
@@ -40,6 +41,7 @@ export const GAS_TOKENS = {
   ETH_MAINNET: 'ETH',
   BASE_MAINNET: 'ETH',
   SOLANA_MAINNET: 'SOL',
+  SOLANA_DEVNET: 'SOL',
 };
 
 export const FORCE_QUERY_CHAINS = {

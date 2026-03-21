@@ -133,23 +133,6 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
   }
 };
 
-export const WALLET_CHAIN_LABELS = { // Chain label map for wallet titles in UserMenu.tsx (resolveWalletTitle)
-  ETH_MAINNET: 'Ethereum', // Label for ETH mainnet in UserMenu.tsx
-  ETH_SEPOLIA: 'Ethereum Testnet', // Label for ETH Sepolia in UserMenu.tsx
-  BASE_MAINNET: 'Base', // Label for Base mainnet in UserMenu.tsx
-  BASE_SEPOLIA: 'Base Testnet', // Label for Base Sepolia in UserMenu.tsx
-  SOLANA_MAINNET: 'Solana', // Label for Solana mainnet in UserMenu.tsx
-};
-
-export const WALLET_CHAIN_OPTIONS = [ // Wallet chain dropdown options in UserMenu.tsx
-  { key: 'ALL', label: 'All Chains' }, // All-chains option in UserMenu.tsx dropdowns
-  { key: 'ETH_MAINNET', label: 'Ethereum Mainnet' }, // ETH mainnet option in UserMenu.tsx dropdowns
-  { key: 'ETH_SEPOLIA', label: 'Ethereum Testnet' }, // ETH Sepolia option in UserMenu.tsx dropdowns
-  { key: 'BASE_MAINNET', label: 'Base Mainnet' }, // Base mainnet option in UserMenu.tsx dropdowns
-  { key: 'BASE_SEPOLIA', label: 'Base Testnet' }, // Base Sepolia option in UserMenu.tsx dropdowns
-  { key: 'SOLANA_MAINNET', label: 'Solana Mainnet' }, // Solana mainnet option in UserMenu.tsx dropdowns
-] as const; // Preserve literal types for UserMenu.tsx type inference
-
 export const CHAIN_OPTIONS = {
   enableTestnets: true, // Toggles display of testnets
   enableMainnets: true, // Toggles display of mainnets

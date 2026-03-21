@@ -10,6 +10,7 @@ import {
   ETH_MAINNET,
   ETH_SEPOLIA,
   SOLANA_MAINNET,
+  SOLANA_DEVNET,
   resolveRpcUrls,
 } from '../../../../config/chain_info';
 import type { ApiBalancesResponse, ApiTokenBalance } from '../../../../config/balance_types';
@@ -72,7 +73,9 @@ export const fromMongoToPayload = (params: {
   return {
     chain: params.chain,
     tokens,
-    ...(params.chain === 'SOLANA_MAINNET' ? { solanaAddress: params.address } : { address: params.address }),
+    ...((params.chain === 'SOLANA_MAINNET' || params.chain === 'SOLANA_DEVNET')
+      ? { solanaAddress: params.address }
+      : { address: params.address }),
     source: 'mongo',
     verifiedAt: now,
     timestamp: now,
@@ -85,7 +88,11 @@ const chainInfoByKey = {
   ETH_MAINNET,
   BASE_MAINNET,
   SOLANA_MAINNET,
+  SOLANA_DEVNET,
 } as const;
+
+const isSolanaChain = (chainKey: ChainKey) =>
+  chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET';
 
 async function fetchBlockchainBalancesDynamic(params: {
   chainKey: ChainKey;
@@ -94,13 +101,43 @@ async function fetchBlockchainBalancesDynamic(params: {
 }): Promise<Record<string, BalanceEntry>> {
   const { chainKey, walletAddress, seedBalances } = params;
   const symbolSeed = Object.keys(seedBalances);
-  const nativeSymbol = GAS_TOKENS[chainKey]?.toUpperCase() ?? (chainKey === 'SOLANA_MAINNET' ? 'SOL' : 'ETH');
+  const nativeSymbol = GAS_TOKENS[chainKey]?.toUpperCase() ?? (isSolanaChain(chainKey) ? 'SOL' : 'ETH');
   const tokenSymbols = Array.from(new Set([nativeSymbol, ...symbolSeed.map((s) => s.toUpperCase())]));
   const output: Record<string, BalanceEntry> = {};
 
-  if (chainKey === 'SOLANA_MAINNET') {
-    const connection = new Connection(SOLANA_MAINNET.rpcUrls[0], 'confirmed');
+  if (isSolanaChain(chainKey)) {
+    const solanaConfig = chainKey === 'SOLANA_MAINNET' ? SOLANA_MAINNET : SOLANA_DEVNET;
+    const connection = new Connection(solanaConfig.rpcUrls[0], 'confirmed');
     const owner = new PublicKey(walletAddress);
+    const balancesByMint = new Map<string, { amount: bigint; decimals: number }>();
+
+    const tokenProgramIds = [
+      'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+      'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+    ];
+
+    for (const programId of tokenProgramIds) {
+      try {
+        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(owner, { programId: new PublicKey(programId) });
+        tokenAccounts.value.forEach((tokenAccount) => {
+          const parsed = tokenAccount.account.data;
+          if (!('parsed' in parsed)) return;
+          const mint = parsed.parsed?.info?.mint;
+          const amount = parsed.parsed?.info?.tokenAmount?.amount;
+          const decimals = parsed.parsed?.info?.tokenAmount?.decimals;
+          if (typeof mint !== 'string' || typeof amount !== 'string') return;
+          const current = balancesByMint.get(mint);
+          const nextAmount = BigInt(amount);
+          const nextDecimals = typeof decimals === 'number' ? decimals : (current?.decimals ?? 0);
+          balancesByMint.set(mint, {
+            amount: (current?.amount ?? 0n) + nextAmount,
+            decimals: nextDecimals,
+          });
+        });
+      } catch {
+        // Ignore token-program specific failures and continue with whatever data is available.
+      }
+    }
 
     for (const symbol of tokenSymbols) {
       const seed = seedBalances[symbol] ?? seedBalances[symbol.toUpperCase()];
@@ -135,24 +172,9 @@ async function fetchBlockchainBalancesDynamic(params: {
         continue;
       }
 
-      let raw = '0';
-      let decimals = seedDecimals ?? 0;
-      try {
-        const mint = new PublicKey(seedAddress);
-        const accounts = await connection.getParsedTokenAccountsByOwner(owner, { mint });
-        const total = accounts.value.reduce((acc, tokenAccount) => {
-          const parsed = tokenAccount.account.data;
-          if (!('parsed' in parsed)) return acc;
-          const amount = parsed.parsed?.info?.tokenAmount?.amount ?? '0';
-          const next = BigInt(amount);
-          const parsedDecimals = parsed.parsed?.info?.tokenAmount?.decimals;
-          if (typeof parsedDecimals === 'number') decimals = parsedDecimals;
-          return acc + next;
-        }, 0n);
-        raw = total.toString();
-      } catch {
-        raw = '0';
-      }
+      const mintAggregate = balancesByMint.get(seedAddress);
+      const raw = (mintAggregate?.amount ?? 0n).toString();
+      const decimals = mintAggregate?.decimals ?? seedDecimals ?? 0;
 
       output[symbol] = {
         symbol,
@@ -272,7 +294,9 @@ const toResponseFromBlockchain = (params: {
   return {
     chain: params.chain,
     tokens,
-    ...(params.chain === 'SOLANA_MAINNET' ? { solanaAddress: params.address } : { address: params.address }),
+    ...((params.chain === 'SOLANA_MAINNET' || params.chain === 'SOLANA_DEVNET')
+      ? { solanaAddress: params.address }
+      : { address: params.address }),
     source: 'blockchain',
     verifiedAt: now,
     timestamp: now,
@@ -309,7 +333,7 @@ export async function POST(req: Request) {
     const resolvedChainKey: ChainKey = chain && chain in CHAINS ? chain : (BLOCKCHAIN as ChainKey);
 
     const walletAddress = overrideAddress
-      ?? (resolvedChainKey === 'SOLANA_MAINNET'
+      ?? ((resolvedChainKey === 'SOLANA_MAINNET' || resolvedChainKey === 'SOLANA_DEVNET')
         ? (tokenToVerify ? await getPrivySolanaWalletAddress(tokenToVerify) : null)
         : (tokenToVerify ? await getPrivyEvmWalletAddress(tokenToVerify) : null));
 

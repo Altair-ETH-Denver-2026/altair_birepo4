@@ -9,6 +9,7 @@ import {
   ETH_MAINNET,
   ETH_SEPOLIA,
   SOLANA_MAINNET,
+  SOLANA_DEVNET,
   resolveRpcUrls,
 } from '../../../../config/chain_info';
 import * as BaseTokens from '../../../../config/token_info/base_tokens';
@@ -74,6 +75,7 @@ const CHAIN_LABELS: Record<ChainKey, string> = {
   BASE_MAINNET: 'Base',
   BASE_SEPOLIA: 'Base',
   SOLANA_MAINNET: 'Solana',
+  SOLANA_DEVNET: 'Solana',
 };
 
 const resolveBalanceBefore = (params: {
@@ -132,7 +134,8 @@ const EVM_CHAIN_IDS: Partial<Record<ChainKey, number>> = {
   BASE_SEPOLIA: BASE_SEPOLIA.chainId,
 };
 
-const isEvmChain = (chainKey: ChainKey): chainKey is Exclude<ChainKey, 'SOLANA_MAINNET'> => chainKey !== 'SOLANA_MAINNET';
+const isSolanaChain = (chainKey: ChainKey) => chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET';
+const isEvmChain = (chainKey: ChainKey): chainKey is Exclude<ChainKey, 'SOLANA_MAINNET' | 'SOLANA_DEVNET'> => !isSolanaChain(chainKey);
 
 const resolveChainLabel = (chainKey: ChainKey) => {
   switch (chainKey) {
@@ -143,6 +146,7 @@ const resolveChainLabel = (chainKey: ChainKey) => {
     case 'BASE_SEPOLIA':
       return 'Base';
     case 'SOLANA_MAINNET':
+    case 'SOLANA_DEVNET':
       return 'Solana';
     default:
       return chainKey;
@@ -343,7 +347,7 @@ const resolveGasFee = async (params: {
   solanaTx?: VersionedTransactionResponse | null;
 }) => {
   const { chainKey, txHash, evmReceipt, solanaTx } = params;
-  if (chainKey === 'SOLANA_MAINNET') {
+  if (isSolanaChain(chainKey)) {
     const tx = solanaTx ?? null;
     if (typeof tx?.meta?.fee === 'number') {
       return { token: 'SOL', amount: tx.meta.fee.toString() };
@@ -356,7 +360,6 @@ const resolveGasFee = async (params: {
     ETH_SEPOLIA,
     ETH_MAINNET,
     BASE_MAINNET,
-    SOLANA_MAINNET,
   } as const;
   const chainConfig = chainConfigs[chainKey];
   if (!chainConfig || !('rpcUrls' in chainConfig)) {
@@ -431,7 +434,7 @@ const resolveTokenDecimals = async (params: {
     console.warn('[test-swap] token decimals lookup failed', err);
   }
 
-  if (chainKey === 'SOLANA_MAINNET') {
+  if (isSolanaChain(chainKey)) {
     if (normalizedBuy === 'SOL') return tokenConfig.SOL?.decimals ?? 9;
     if (tokenConfig[normalizedBuy]?.decimals !== undefined) return tokenConfig[normalizedBuy].decimals;
     return null;
@@ -450,13 +453,14 @@ const resolveBuyAmount = async (params: {
   buyTokenAddressOrMint?: string | null;
 }): Promise<{ amountRaw: string; evmReceipt?: ethers.TransactionReceipt | null; solanaTx?: VersionedTransactionResponse | null }> => {
   const { chainKey, txHash, buyToken, recipient, buyTokenAddressOrMint } = params;
-  if (chainKey === 'SOLANA_MAINNET') {
+  if (isSolanaChain(chainKey)) {
     const tokenConfigs: Record<ChainKey, Record<string, TokenInfo>> = {
       BASE_SEPOLIA: buildTokenMap(BaseSepoliaTokens as Record<string, TokenInfo>),
       ETH_SEPOLIA: buildTokenMap(EthSepoliaTokens as Record<string, TokenInfo>),
       ETH_MAINNET: buildTokenMap(EthTokens as Record<string, TokenInfo>),
       BASE_MAINNET: buildTokenMap(BaseTokens as Record<string, TokenInfo>),
       SOLANA_MAINNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
+      SOLANA_DEVNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
     };
     const tokenConfig = applyTokenEnvOverrides(chainKey, tokenConfigs[chainKey]);
     const normalizedBuy = buyToken.toUpperCase();
@@ -483,7 +487,7 @@ const resolveBuyAmount = async (params: {
     if (!buyTokenInfo?.mint) {
       throw new Error(`Unable to resolve Solana mint for ${buyToken}`);
     }
-    const chainConfig = SOLANA_MAINNET;
+    const chainConfig = chainKey === 'SOLANA_MAINNET' ? SOLANA_MAINNET : SOLANA_DEVNET;
     const rpcUrl = resolveRpcUrl(chainConfig.rpcUrls);
     const connection = new Connection(rpcUrl, 'confirmed');
     const tx = await withWaitLogger(
@@ -540,7 +544,6 @@ const resolveBuyAmount = async (params: {
     ETH_SEPOLIA,
     ETH_MAINNET,
     BASE_MAINNET,
-    SOLANA_MAINNET,
   } as const;
   const chainConfig = chainConfigs[chainKey];
   if (!chainConfig || !('rpcUrls' in chainConfig)) {
@@ -569,6 +572,7 @@ const resolveBuyAmount = async (params: {
     ETH_MAINNET: buildTokenMap(EthTokens as Record<string, TokenInfo>),
     BASE_MAINNET: buildTokenMap(BaseTokens as Record<string, TokenInfo>),
     SOLANA_MAINNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
+    SOLANA_DEVNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
   };
   const tokenConfig = applyTokenEnvOverrides(chainKey, tokenConfigs[chainKey]);
   const buyTokenAddress = resolveBuyTokenAddress({
@@ -839,6 +843,7 @@ export async function POST(req: Request) {
       ETH_MAINNET,
       BASE_MAINNET,
       SOLANA_MAINNET,
+      SOLANA_DEVNET,
     } as const;
 
     const chainConfig = chainConfigs[resolvedChainKey];
@@ -849,6 +854,7 @@ export async function POST(req: Request) {
       ETH_MAINNET: buildTokenMap(EthTokens as Record<string, TokenInfo>),
       BASE_MAINNET: buildTokenMap(BaseTokens as Record<string, TokenInfo>),
       SOLANA_MAINNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
+      SOLANA_DEVNET: buildTokenMap(SolanaTokens as Record<string, TokenInfo>),
     };
 
     const tokenConfig = applyTokenEnvOverrides(resolvedChainKey, tokenConfigs[resolvedChainKey]);
@@ -869,7 +875,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing buy or sell token' }, { status: 400 });
     }
 
-    const isSolana = resolvedChainKey === 'SOLANA_MAINNET';
+    const isSolana = isSolanaChain(resolvedChainKey);
     const provider = typeof providerFromBody === 'string' && providerFromBody.trim().length > 0
       ? providerFromBody.trim()
       : isSolana
