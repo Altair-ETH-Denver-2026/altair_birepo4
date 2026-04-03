@@ -58,19 +58,35 @@ This project centralizes runtime and UI configuration in the root-level [`config
 **Exports:**
 - `BALANCE_DECIMALS`: formatting precision for balance display.
 - `LOGO_SPIN_MIN_MS` / `LOGO_SPIN_MAX_MS`: hover spin timings.
-- `X_SIZE`: close “×” font size.
-- `WALLET_DISPLAY`: UI mode config (`panel` vs `drop_down`).
+- `X_SIZE`: close "×" font size.
+- `WALLET_DISPLAY`: UI mode config (`panel` vs `drop_down`), including `getCrypto.link` for external affiliate links.
 - `MENU_ICONS`: spacing, size, and visual styling for the top-right icon row (offsets, justification, size, icon/container colors, border color/width, highlight color).
+- `ACTIVE_NETWORK_DROPDOWN`: styling configuration for the active network dropdown menu (width, font properties, colors, item height). Note: This configures only the dropdown itself; the button that triggers the dropdown uses `MENU_ICONS` for styling.
 - `HOME_ICON`: independent position/size config for the top-left home logo.
 - `TITLE_PANEL`: offsets, text spacing, logo size, gradient colors, and overall scale for the title block.
 - `CHAT_PANEL`: sizing, border, and color palette for the chat container and bubbles (panel size, border, bubble/text colors, input focus highlight, agent icon border, and send button colors).
 
 **Usage:**
 - Menu icon layout and styling in [`UserMenu`](src/components/UserMenu.tsx:8).
+- Active network dropdown styling in [`UserMenu`](src/components/UserMenu.tsx:1560).
 - Home logo positioning/sizing in [`page.tsx`](src/app/page.tsx:16).
 - Title block sizing/spacing/gradient in [`page.tsx`](src/app/page.tsx:51).
 - Chat container/bubble/button/input styling in [`Chat`](src/components/Chat.tsx:145).
 - Logo hover animation timing in [`SpinningLogo`](src/components/SpinningLogo.tsx:5).
+- "Get Crypto" button linking via `WALLET_DISPLAY.getCrypto.link` in [`UserMenu`](src/components/UserMenu.tsx:1745) and [`WalletPanel`](src/components/panels/WalletPanel.tsx:397).
+
+## `external_links.ts`
+
+**Purpose:** Centralized configuration for external affiliate links and third-party URLs.
+
+**Exports:**
+- `AFFILIATE_LINKS`: Object containing affiliate/referral links for external services.
+  - `Coinbase`: Coinbase Advanced affiliate link for cryptocurrency purchases.
+
+**Usage:**
+- Imported by `ui_config.ts` to provide `WALLET_DISPLAY.getCrypto.link` value.
+- Used by "Get Crypto" buttons in [`UserMenu`](src/components/UserMenu.tsx:1745) and [`WalletPanel`](src/components/panels/WalletPanel.tsx:397) to link users to external cryptocurrency purchase platforms.
+- Provides a single source of truth for external URLs, making it easy to update affiliate links or add new external services.
 
 ## General Import Rules
 
@@ -78,3 +94,4 @@ This project centralizes runtime and UI configuration in the root-level [`config
 - Chain RPC/scan/Uniswap metadata comes from [`chain_info`](config/chain_info.ts:1).
 - Token addresses come from the appropriate file under [`token_info`](config/token_info/base_tokens.ts:1).
 - UI constants and display flags come from [`ui_config`](config/ui_config.ts:1).
+- External affiliate links and third-party URLs come from [`external_links`](config/external_links.ts:1).

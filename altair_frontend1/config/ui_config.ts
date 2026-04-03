@@ -14,27 +14,14 @@ export const PANEL_DISPLAY = {
   },
 };
 
-export const ACTIVE_NETWORK_DISPLAY = {
-  menuButton: {
-    paddingLeft: `REPLACE WITH CURRENT VALUE`,
-    paddingRight: `REPLACE WITH CURRENT VALUE`,
-    fontSize: `REPLACE WITH CURRENT VALUE`,
-    fontName: `REPLACE WITH CURRENT VALUE`,
-    fontColor: `REPLACE WITH CURRENT VALUE`,
-    color: `REPLACE WITH CURRENT VALUE`,
-    highlighColor: `REPLACE WITH CURRENT VALUE`,
-    borderColor: `REPLACE WITH CURRENT VALUE`,
-    borderHighlighColor: `REPLACE WITH CURRENT VALUE`,
-  },
-  chainDropdown: {
-    width: `REPLACE WITH CURRENT VALUE`,
-    fontSize: `REPLACE WITH CURRENT VALUE`,
-    fontName: `REPLACE WITH CURRENT VALUE`,
-    fontColor: `REPLACE WITH CURRENT VALUE`,
-    buttonColor: `REPLACE WITH CURRENT VALUE`,
-    buttonHighlighColor: `REPLACE WITH CURRENT VALUE`,
-    buttonHeight: `REPLACE WITH CURRENT VALUE`,
-  },
+export const ACTIVE_NETWORK_DROPDOWN = {
+  width: 240, // w-48 = 48 * 4 = 192px (Tailwind w-48 = 12rem = 192px)
+  fontSize: 14, // text-sm = 14px
+  fontName: 'sans-serif', // default font
+  fontColor: '#d1d5db', // text-gray-300
+  itemColor: '#101828', // bg-gray-900
+  itemHighlightColor: '#1f2937', // hover:bg-gray-800
+  itemHeight: 48, // py-3 = 12px top + bottom, estimated total height
 }
 
 export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography config consumed in altair_frontend1/src/components/UserMenu.tsx
