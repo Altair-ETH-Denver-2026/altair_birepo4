@@ -1284,6 +1284,7 @@ export default function UserMenu() {
       setIsMaxHovering={setIsMaxHovering}
       onMaxClick={handleMaxClick}
       resolveTxUrl={resolveTxUrl}
+      getCryptoLink={WALLET_DISPLAY.getCrypto.link}
       onClose={() => {
         closeWalletPanel(panel.id, () => {
           setIsWalletPanelOpen(false);
@@ -1721,18 +1722,21 @@ export default function UserMenu() {
               >
                 Withdraw
               </button>
-              <button
-                type="button"
-                className="flex items-center justify-center rounded-lg border border-gray-700 bg-gray-800/60 text-gray-100 hover:border-gray-500 hover:bg-gray-800 transition-colors cursor-pointer"
+              <a
+                href={WALLET_DISPLAY.getCrypto.link}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-center rounded-lg border border-gray-700 bg-gray-800/60 text-gray-100 hover:border-gray-500 hover:bg-gray-800 transition-colors cursor-pointer no-underline"
                 style={{
                   height: `${buttonHeight}px`,
                   paddingLeft: `${buttonPaddingX}px`,
                   paddingRight: `${buttonPaddingX}px`,
                   fontSize: `${buttonFontSize}px`,
+                  textDecoration: 'none',
                 }}
               >
                 Get Crypto
-              </button>
+              </a>
             </div>
             <div className="h-[1px] bg-gray-700 w-full" />
             <div

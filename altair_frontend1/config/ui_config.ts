@@ -1,3 +1,5 @@
+import { AFFILIATE_LINKS } from './external_links';
+
 export const BALANCE_DECIMALS = 8; // Token balance display precision used in renderBalances in altair_frontend1/src/components/UserMenu.tsx
 export const LOGO_SPIN_MIN_MS = 400; // Min logo spin duration used by logo animation logic (see altair_frontend1/src/components/SpinningLogo.tsx)
 export const LOGO_SPIN_MAX_MS = 2000; // Max logo spin duration used by logo animation logic (see altair_frontend1/src/components/SpinningLogo.tsx)
@@ -11,6 +13,29 @@ export const PANEL_DISPLAY = {
     opacity: 75,
   },
 };
+
+export const ACTIVE_NETWORK_DISPLAY = {
+  menuButton: {
+    paddingLeft: `REPLACE WITH CURRENT VALUE`,
+    paddingRight: `REPLACE WITH CURRENT VALUE`,
+    fontSize: `REPLACE WITH CURRENT VALUE`,
+    fontName: `REPLACE WITH CURRENT VALUE`,
+    fontColor: `REPLACE WITH CURRENT VALUE`,
+    color: `REPLACE WITH CURRENT VALUE`,
+    highlighColor: `REPLACE WITH CURRENT VALUE`,
+    borderColor: `REPLACE WITH CURRENT VALUE`,
+    borderHighlighColor: `REPLACE WITH CURRENT VALUE`,
+  },
+  chainDropdown: {
+    width: `REPLACE WITH CURRENT VALUE`,
+    fontSize: `REPLACE WITH CURRENT VALUE`,
+    fontName: `REPLACE WITH CURRENT VALUE`,
+    fontColor: `REPLACE WITH CURRENT VALUE`,
+    buttonColor: `REPLACE WITH CURRENT VALUE`,
+    buttonHighlighColor: `REPLACE WITH CURRENT VALUE`,
+    buttonHeight: `REPLACE WITH CURRENT VALUE`,
+  },
+}
 
 export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography config consumed in altair_frontend1/src/components/UserMenu.tsx
   logo: true,
@@ -74,6 +99,9 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
     width: 124,
     fontSize: 12,
     fontName: 'sans-serif',
+  },
+  getCrypto: {
+    link: AFFILIATE_LINKS.Coinbase
   },
   withdraw: {
     symbolInput: {
