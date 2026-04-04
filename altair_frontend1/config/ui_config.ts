@@ -175,7 +175,7 @@ export const CHAIN_OPTIONS = {
       selectedLabel: 'Ethereum Sepolia Testnet',
     },
     walletDisplay: {
-      dropdownLabel: 'Ethereum Sepolia Testnet',
+      dropdownLabel: 'Ethereum Testnet',
       selectedLabel: 'Ethereum Testnet',
     }
   },
@@ -203,7 +203,7 @@ export const CHAIN_OPTIONS = {
       selectedLabel: 'Base Sepolia Testnet',
     },
     walletDisplay: {
-      dropdownLabel: 'Base Sepolia Testnet',
+      dropdownLabel: 'Base Testnet',
       selectedLabel: 'Base Testnet',
     }
   },

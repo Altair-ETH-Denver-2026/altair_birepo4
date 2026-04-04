@@ -17,6 +17,7 @@ import type { ApiBalancesResponse, ApiTokenBalance } from '../../../../config/ba
 import { getPrivyEvmWalletAddress, getPrivySolanaWalletAddress } from '@/lib/privy';
 import {
   getBalancesFromMongoDB,
+  getUIDFromAccessToken,
   updateBalancesInMongoDB,
   type BalanceEntry,
 } from '@/lib/balanceService';
@@ -94,6 +95,174 @@ const chainInfoByKey = {
 const isSolanaChain = (chainKey: ChainKey) =>
   chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET';
 
+const EVM_CHAIN_KEYS: ChainKey[] = ['ETH_MAINNET', 'ETH_SEPOLIA', 'BASE_MAINNET', 'BASE_SEPOLIA'];
+
+const ALCHEMY_PORTFOLIO_NETWORK_BY_CHAIN: Partial<Record<ChainKey, string>> = {
+  ETH_MAINNET: 'eth-mainnet',
+  ETH_SEPOLIA: 'eth-sepolia',
+  BASE_MAINNET: 'base-mainnet',
+  BASE_SEPOLIA: 'base-sepolia',
+};
+
+const CHAIN_BY_ALCHEMY_PORTFOLIO_NETWORK: Record<string, ChainKey> = {
+  'eth-mainnet': 'ETH_MAINNET',
+  'eth-sepolia': 'ETH_SEPOLIA',
+  'base-mainnet': 'BASE_MAINNET',
+  'base-sepolia': 'BASE_SEPOLIA',
+};
+
+const normalizeRawBalance = (value: unknown): string => {
+  if (typeof value !== 'string') return '0';
+  const raw = value.trim();
+  if (!raw) return '0';
+  if (raw.startsWith('0x') || raw.startsWith('0X')) {
+    try {
+      return BigInt(raw).toString();
+    } catch {
+      return '0';
+    }
+  }
+  return raw;
+};
+
+const cloneSeedEntry = (symbol: string, seed?: BalanceEntry): BalanceEntry => ({
+  symbol,
+  name: seed?.name ?? symbol,
+  address: seed?.address ?? '',
+  decimals: typeof seed?.decimals === 'number' ? seed.decimals : 18,
+  balance: seed?.balance ?? '0',
+  source: 'blockchain',
+  verifiedAt: Date.now(),
+});
+
+const fetchEvmBalancesViaAlchemyPortfolio = async (params: {
+  walletAddress: string;
+  chainKeys: ChainKey[];
+  seedByChain: Partial<Record<ChainKey, Record<string, BalanceEntry>>>;
+}): Promise<Record<ChainKey, Record<string, BalanceEntry>>> => {
+  const apiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+  if (!apiKey) {
+    throw new Error('NEXT_PUBLIC_ALCHEMY_API_KEY is required for Alchemy Portfolio token balances');
+  }
+
+  const requestedNetworks = params.chainKeys
+    .map((chainKey) => ALCHEMY_PORTFOLIO_NETWORK_BY_CHAIN[chainKey])
+    .filter((network): network is string => typeof network === 'string' && network.length > 0);
+
+  if (requestedNetworks.length === 0) {
+    return {} as Record<ChainKey, Record<string, BalanceEntry>>;
+  }
+
+  const out: Record<ChainKey, Record<string, BalanceEntry>> = {} as Record<ChainKey, Record<string, BalanceEntry>>;
+  const trackedSymbolsByChain: Partial<Record<ChainKey, Set<string>>> = {};
+
+  for (const chainKey of params.chainKeys) {
+    const seed = params.seedByChain[chainKey] ?? {};
+    const seeded: Record<string, BalanceEntry> = {};
+    const tracked = new Set<string>();
+    const nativeSymbol = GAS_TOKENS[chainKey]?.toUpperCase() ?? 'ETH';
+
+    // Always track native symbol, even when absent from seed set.
+    tracked.add(nativeSymbol);
+    seeded[nativeSymbol] = cloneSeedEntry(nativeSymbol, {
+      symbol: nativeSymbol,
+      address: NATIVE_EVM_ADDRESS,
+      decimals: 18,
+      balance: '0',
+      source: 'blockchain',
+      verifiedAt: Date.now(),
+    });
+
+    Object.entries(seed).forEach(([symbol, entry]) => {
+      const normalized = symbol.toUpperCase();
+      seeded[normalized] = cloneSeedEntry(normalized, { ...entry, symbol: entry.symbol ?? normalized });
+      tracked.add(normalized);
+    });
+    out[chainKey] = seeded;
+    trackedSymbolsByChain[chainKey] = tracked;
+  }
+
+  const endpoint = `https://api.g.alchemy.com/data/v1/${apiKey}/assets/tokens/by-address`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      addresses: [
+        {
+          address: params.walletAddress,
+          networks: requestedNetworks,
+        },
+      ],
+      withMetadata: true,
+      includeNativeTokens: true,
+      includeErc20Tokens: true,
+      withPrices: false,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new Error(`Alchemy Portfolio token fetch failed (${response.status}): ${errText}`);
+  }
+
+  const payload = (await response.json()) as {
+    data?: {
+      tokens?: Array<{
+        network?: string;
+        tokenAddress?: string;
+        tokenBalance?: string;
+        tokenMetadata?: {
+          symbol?: string;
+          name?: string;
+          decimals?: number;
+        };
+      }>;
+    };
+  };
+
+  const now = Date.now();
+  const tokens = Array.isArray(payload?.data?.tokens) ? payload.data.tokens : [];
+
+  for (const token of tokens) {
+    const networkRaw = typeof token?.network === 'string' ? token.network.toLowerCase() : '';
+    const chainKey = CHAIN_BY_ALCHEMY_PORTFOLIO_NETWORK[networkRaw];
+    if (!chainKey || !out[chainKey]) continue;
+
+    const symbolRaw = typeof token?.tokenMetadata?.symbol === 'string' && token.tokenMetadata.symbol.length > 0
+      ? token.tokenMetadata.symbol
+      : (GAS_TOKENS[chainKey] ?? 'TOKEN');
+    const symbol = symbolRaw.toUpperCase();
+    const trackedSymbols = trackedSymbolsByChain[chainKey] ?? new Set<string>();
+    if (!trackedSymbols.has(symbol)) {
+      // Keep EVM behavior aligned with Solana: update only tracked/seeded symbols (+ native).
+      continue;
+    }
+    const seed = out[chainKey][symbol];
+    const isLikelyNative =
+      !token?.tokenAddress ||
+      token.tokenAddress === 'NATIVE_TOKEN' ||
+      token.tokenAddress === '0x0000000000000000000000000000000000000000';
+
+    out[chainKey][symbol] = {
+      symbol,
+      name: typeof token?.tokenMetadata?.name === 'string' && token.tokenMetadata.name.length > 0
+        ? token.tokenMetadata.name
+        : (seed?.name ?? symbol),
+      address: isLikelyNative
+        ? NATIVE_EVM_ADDRESS
+        : (typeof token?.tokenAddress === 'string' ? token.tokenAddress : (seed?.address ?? '')),
+      decimals: typeof token?.tokenMetadata?.decimals === 'number'
+        ? token.tokenMetadata.decimals
+        : (seed?.decimals ?? 18),
+      balance: normalizeRawBalance(token?.tokenBalance),
+      source: 'blockchain',
+      verifiedAt: now,
+    };
+  }
+
+  return out;
+};
+
 async function fetchBlockchainBalancesDynamic(params: {
   chainKey: ChainKey;
   walletAddress: string;
@@ -107,7 +276,9 @@ async function fetchBlockchainBalancesDynamic(params: {
 
   if (isSolanaChain(chainKey)) {
     const solanaConfig = chainKey === 'SOLANA_MAINNET' ? SOLANA_MAINNET : SOLANA_DEVNET;
-    const connection = new Connection(solanaConfig.rpcUrls[0], 'confirmed');
+    const solanaRpcUrls = resolveRpcUrls(solanaConfig.rpcUrls);
+    const solanaRpcUrl = solanaRpcUrls[0] ?? solanaConfig.rpcUrls[0];
+    const connection = new Connection(solanaRpcUrl, 'confirmed');
     const owner = new PublicKey(walletAddress);
     const balancesByMint = new Map<string, { amount: bigint; decimals: number }>();
 
@@ -341,11 +512,28 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Unable to resolve wallet address' }, withCors({ status: 401 }));
     }
 
-    const uid = tokenToVerify
+    const uidFromToken = tokenToVerify
       ? await getUserUIDFromAccessTokenByMode(tokenToVerify, 'login').catch(() => null)
       : null;
+    const uid = uidFromToken
+      ?? await getUIDFromAccessToken(walletAddress).catch(() => null);
+    const useEvmPortfolioPath = !isSolanaChain(resolvedChainKey);
+    const evmChainKeys = EVM_CHAIN_KEYS.filter((chainKey) => chainKey in CHAINS);
+
+    const evmMongoByChain: Partial<Record<ChainKey, Record<string, BalanceEntry>>> =
+      uid && useEvmPortfolioPath
+        ? Object.fromEntries(
+            await Promise.all(
+              evmChainKeys.map(async (chainKey) => {
+                const balances = await getBalancesFromMongoDB(uid, chainKey);
+                return [chainKey, balances ?? {}] as const;
+              })
+            )
+          ) as Partial<Record<ChainKey, Record<string, BalanceEntry>>>
+        : {};
+
     const mongoBalances = uid
-      ? await getBalancesFromMongoDB(uid, resolvedChainKey)
+      ? (useEvmPortfolioPath ? (evmMongoByChain[resolvedChainKey] ?? null) : await getBalancesFromMongoDB(uid, resolvedChainKey))
       : null;
 
     const shouldForceRefresh = Boolean(forceRefresh);
@@ -360,12 +548,26 @@ export async function POST(req: Request) {
       if (uid) {
         void (async () => {
           try {
-            const verifiedBalances = await fetchBlockchainBalancesDynamic({
-              chainKey: resolvedChainKey,
-              walletAddress,
-              seedBalances: mongoBalances,
-            });
-            await updateBalancesInMongoDB(uid, resolvedChainKey, verifiedBalances, 'blockchain');
+            if (useEvmPortfolioPath) {
+              const verifiedByChain = await fetchEvmBalancesViaAlchemyPortfolio({
+                walletAddress,
+                chainKeys: evmChainKeys,
+                seedByChain: evmMongoByChain,
+              });
+              await Promise.all(
+                evmChainKeys.map(async (chainKey) => {
+                  const chainBalances = verifiedByChain[chainKey] ?? {};
+                  await updateBalancesInMongoDB(uid, chainKey, chainBalances, 'blockchain');
+                })
+              );
+            } else {
+              const verifiedBalances = await fetchBlockchainBalancesDynamic({
+                chainKey: resolvedChainKey,
+                walletAddress,
+                seedBalances: mongoBalances,
+              });
+              await updateBalancesInMongoDB(uid, resolvedChainKey, verifiedBalances, 'blockchain');
+            }
           } catch (err) {
             console.warn('[balances] async verification failed', err);
           }
@@ -376,14 +578,50 @@ export async function POST(req: Request) {
     }
 
     const seed = mongoBalances ?? {};
-    const blockchainBalances = await fetchBlockchainBalancesDynamic({
-      chainKey: resolvedChainKey,
-      walletAddress,
-      seedBalances: seed,
-    });
+    const blockchainBalances = await (useEvmPortfolioPath
+      ? (() => {
+          const chainSeedByKey: Partial<Record<ChainKey, Record<string, BalanceEntry>>> = {
+            ...evmMongoByChain,
+            [resolvedChainKey]: seed,
+          };
+          return fetchEvmBalancesViaAlchemyPortfolio({
+            walletAddress,
+            chainKeys: evmChainKeys,
+            seedByChain: chainSeedByKey,
+          }).then((all) => all[resolvedChainKey] ?? {});
+        })()
+      : fetchBlockchainBalancesDynamic({
+          chainKey: resolvedChainKey,
+          walletAddress,
+          seedBalances: seed,
+        }));
 
     if (uid) {
-      void updateBalancesInMongoDB(uid, resolvedChainKey, blockchainBalances, 'blockchain');
+      if (useEvmPortfolioPath) {
+        void (async () => {
+          try {
+            const verifiedByChain = await fetchEvmBalancesViaAlchemyPortfolio({
+              walletAddress,
+              chainKeys: evmChainKeys,
+              seedByChain: {
+                ...evmMongoByChain,
+                [resolvedChainKey]: blockchainBalances,
+              },
+            });
+            await Promise.all(
+              evmChainKeys.map(async (chainKey) => {
+                const chainBalances = verifiedByChain[chainKey] ?? {};
+                await updateBalancesInMongoDB(uid, chainKey, chainBalances, 'blockchain');
+              })
+            );
+          } catch (err) {
+            console.warn('[balances] EVM multi-chain Mongo update failed', err);
+            await updateBalancesInMongoDB(uid, resolvedChainKey, blockchainBalances, 'blockchain');
+          }
+        })();
+      } else {
+        void updateBalancesInMongoDB(uid, resolvedChainKey, blockchainBalances, 'blockchain');
+      }
     }
 
     const payload = toResponseFromBlockchain({

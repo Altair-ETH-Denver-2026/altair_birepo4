@@ -151,11 +151,24 @@ export async function updateBalancesInMongoDB(
   await connectToDatabase();
   
   try {
+    const sanitizeSymbolForMongoKey = (value: string): string => {
+      const trimmed = value.trim();
+      const withoutLeadingDollar = trimmed.replace(/^\$+/, '');
+      const normalized = withoutLeadingDollar.trim().toUpperCase();
+      return normalized.length > 0 ? normalized : 'UNKNOWN';
+    };
+
     // Convert to array format
     const chainBalances: Record<string, any> = {};
     
     Object.entries(balances).forEach(([symbol, entry]) => {
-      chainBalances[symbol] = [entry];
+      const safeSymbol = sanitizeSymbolForMongoKey(symbol);
+      chainBalances[safeSymbol] = [
+        {
+          ...entry,
+          symbol: sanitizeSymbolForMongoKey(entry?.symbol ?? symbol),
+        },
+      ];
     });
 
     const updateData: any = {

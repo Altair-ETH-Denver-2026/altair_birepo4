@@ -29,5 +29,11 @@ The ADD_PANEL is the compact panel used to add new WALLET_PANEL instances. It is
 Selecting a chain from the ADD_PANEL dropdown creates a new WALLET_PANEL instance using that chain. The new panel appears between the existing panels and the ADD_PANEL, pushing the ADD_PANEL downward.
 
 Close behavior:
-- Each WALLET_PANEL “×” removes only that panel.
+- Each WALLET_PANEL "×" removes only that panel.
 - If the last WALLET_PANEL closes, the wallet icon in the top-right menu returns to its inactive state.
+
+### Panel state persistence across open/close cycles
+
+When the wallet button is clicked to dismiss the panel stack (toggling `isWalletPanelOpen` off), the code in [`altair_frontend1/src/components/UserMenu.tsx`](../../altair_frontend1/src/components/UserMenu.tsx) only clears the `walletPanels` array if there is exactly **one** panel open at the time of dismissal. If two or more panels are open, the array is left intact.
+
+On the next wallet button click, `initWalletPanels` (in [`altair_frontend1/src/lib/usePanels.ts`](../../altair_frontend1/src/lib/usePanels.ts)) detects `existing.length > 0` and skips re-initialization, so the previous panel configuration (all open chains) is restored. This is intentional: panels remember their state across open/close cycles when more than one panel was open.

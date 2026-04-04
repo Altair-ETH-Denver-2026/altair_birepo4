@@ -69,15 +69,6 @@ const QUOTE_CACHE_TTL_MS = 15_000;
 type QuoteCacheEntry<T> = { expiresAt: number; value: T };
 const quoteCache = new Map<string, QuoteCacheEntry<unknown>>();
 
-const CHAIN_LABELS: Record<ChainKey, string> = {
-  ETH_MAINNET: 'Ethereum',
-  ETH_SEPOLIA: 'Ethereum',
-  BASE_MAINNET: 'Base',
-  BASE_SEPOLIA: 'Base',
-  SOLANA_MAINNET: 'Solana',
-  SOLANA_DEVNET: 'Solana',
-};
-
 const resolveBalanceBefore = (params: {
   userBalances: Record<string, unknown> | null | undefined;
   chainKey: ChainKey;
@@ -85,13 +76,28 @@ const resolveBalanceBefore = (params: {
 }): string | null => {
   const { userBalances, chainKey, symbol } = params;
   if (!userBalances || typeof userBalances !== 'object') return null;
-  const chainLabel = CHAIN_LABELS[chainKey];
-  const chainBalances = (userBalances as Record<string, unknown>)[chainLabel];
+  if (!(chainKey in CHAINS)) return null;
+
+  const chainBalances = (userBalances as Record<string, unknown>)[chainKey];
   if (!chainBalances || typeof chainBalances !== 'object') return null;
-  const entries = (chainBalances as Record<string, unknown>)[symbol];
-  if (!Array.isArray(entries) || entries.length === 0) return null;
-  const balance = (entries[0] as { balance?: unknown } | undefined)?.balance;
-  return typeof balance === 'string' ? balance : null;
+
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const entryBucket =
+    (chainBalances as Record<string, unknown>)[normalizedSymbol]
+    ?? (chainBalances as Record<string, unknown>)[symbol];
+
+  if (Array.isArray(entryBucket)) {
+    if (entryBucket.length === 0) return null;
+    const balance = (entryBucket[0] as { balance?: unknown } | undefined)?.balance;
+    return typeof balance === 'string' ? balance : null;
+  }
+
+  if (entryBucket && typeof entryBucket === 'object') {
+    const balance = (entryBucket as { balance?: unknown }).balance;
+    return typeof balance === 'string' ? balance : null;
+  }
+
+  return null;
 };
 
 const buildQuoteCacheKey = (parts: Array<string | number | null | undefined>) =>

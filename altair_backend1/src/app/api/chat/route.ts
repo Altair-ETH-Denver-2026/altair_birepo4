@@ -39,10 +39,51 @@ const resolveApiKeyForModel = (model: string): string => {
   return apiKey;
 };
 
+const extractModelFromRequestBody = (body: BodyInit | null | undefined): string | null => {
+  if (typeof body !== 'string') return null;
+  try {
+    const parsed = JSON.parse(body) as { model?: unknown };
+    return typeof parsed?.model === 'string' && parsed.model.length > 0 ? parsed.model : null;
+  } catch {
+    return null;
+  }
+};
+
+const resolveProviderForModelOrUnknown = (model: string | null): string => {
+  if (!model) return 'unknown';
+  try {
+    return resolveProviderForModel(model);
+  } catch {
+    return 'unknown';
+  }
+};
+
+const openAiFetchWithRateLimitLogging: typeof fetch = async (input, init) => {
+  const response = await fetch(input, init);
+  if (response.status === 429) {
+    const modelFromBody = extractModelFromRequestBody(init?.body ?? null);
+    const provider = resolveProviderForModelOrUnknown(modelFromBody);
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    console.warn('[chat][rate-limit][sdk] Server responded with 429 Too Many Requests', {
+      model: modelFromBody,
+      provider,
+      url,
+      retryAfter: response.headers.get('retry-after'),
+    });
+  }
+  return response;
+};
+
 const createOpenAiClient = (model: string) => {
   const provider = resolveProviderForModel(model);
   return new OpenAI({
     apiKey: resolveApiKeyForModel(model),
+    fetch: openAiFetchWithRateLimitLogging,
     ...(PROVIDER_BASE_URLS[provider as keyof typeof PROVIDER_BASE_URLS] ? { baseURL: PROVIDER_BASE_URLS[provider as keyof typeof PROVIDER_BASE_URLS] } : {}),
   });
 };
@@ -82,6 +123,34 @@ const resolveModelCandidates = (models: ReadonlyArray<string> | string): string[
   return typeof models === 'string' && models.length > 0 ? [models] : [];
 };
 
+const isRateLimitedLlmError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') {
+    return false;
+  }
+
+  const candidate = err as {
+    status?: number;
+    code?: string;
+    message?: string;
+    type?: string;
+  };
+
+  if (candidate.status === 429) return true;
+  if (typeof candidate.code === 'string' && candidate.code.toLowerCase().includes('rate')) return true;
+  if (typeof candidate.type === 'string' && candidate.type.toLowerCase().includes('rate')) return true;
+
+  const message = typeof candidate.message === 'string' ? candidate.message.toLowerCase() : '';
+  return message.includes('429') || message.includes('too many requests') || message.includes('rate limit');
+};
+
+const resolveProviderForLog = (model: string): string => {
+  try {
+    return resolveProviderForModel(model);
+  } catch {
+    return 'unknown';
+  }
+};
+
 const generateChatCompletionWithFallback = async (params: {
   models: ReadonlyArray<string> | string;
   messages: OpenAI.Chat.ChatCompletionMessageParam[];
@@ -97,9 +166,31 @@ const generateChatCompletionWithFallback = async (params: {
       return await generateChatCompletion({ model, messages: params.messages });
     } catch (err) {
       lastError = err;
+      const provider = resolveProviderForLog(model);
+      const errorMeta = err as {
+        status?: number;
+        code?: string;
+        type?: string;
+      };
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const isRateLimited = isRateLimitedLlmError(err);
+
+      if (isRateLimited) {
+        console.warn('[chat][rate-limit] LLM request was rate limited', {
+          model,
+          provider,
+          status: typeof errorMeta?.status === 'number' ? errorMeta.status : null,
+          code: typeof errorMeta?.code === 'string' ? errorMeta.code : null,
+          type: typeof errorMeta?.type === 'string' ? errorMeta.type : null,
+          error: errorMessage,
+        });
+      }
+
       console.warn('[chat] LLM model failed, trying next', {
         model,
-        error: err instanceof Error ? err.message : String(err),
+        provider,
+        isRateLimited,
+        error: errorMessage,
       });
     }
   }

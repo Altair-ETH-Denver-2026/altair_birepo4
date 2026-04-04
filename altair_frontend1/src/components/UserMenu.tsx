@@ -519,6 +519,7 @@ export default function UserMenu() {
             body: JSON.stringify({
               ...(token ? { accessToken: token } : {}),
               chain: chainKey,
+              ...(forceRefresh ? { forceRefresh: true } : {}),
               walletAddress: chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET' ? solanaAddressValue ?? undefined : cachedAddress ?? undefined,
             }),
           })

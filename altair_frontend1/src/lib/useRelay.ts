@@ -488,32 +488,10 @@ export const useRelay = () => {
     });
     const isSolanaOrigin = originChainId === 792703809;
     const isSolanaDestination = destinationChainId === 792703809;
-    let solanaRecipient = isSolanaDestination ? solanaWallets?.[0]?.address ?? null : null;
-    let solanaUser = isSolanaOrigin ? solanaWallets?.[0]?.address ?? null : null;
-    if ((isSolanaOrigin || isSolanaDestination) && (!solanaRecipient || !solanaUser)) {
-      const cachedToken = await getCachedPrivyAccessToken(getAccessToken).catch(() => null);
-      const response = cachedToken
-        ? await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              message: 'resolve solana address',
-              history: [],
-              accessToken: cachedToken,
-              selectedChain: 'SOLANA_MAINNET',
-              solanaAddress: null,
-            }),
-          }).catch(() => null)
-        : null;
-      if (response?.ok) {
-        const payload = await response.json().catch(() => ({}));
-        const resolved = typeof payload?.solAddress === 'string' ? payload.solAddress : null;
-        if (isSolanaDestination) solanaRecipient = resolved;
-        if (isSolanaOrigin) solanaUser = resolved;
-      }
-      if ((isSolanaDestination && !solanaRecipient) || (isSolanaOrigin && !solanaUser)) {
-        throw new Error('Missing Solana wallet address for Relay. Connect a Solana wallet in Privy.');
-      }
+    const solanaRecipient = isSolanaDestination ? solanaWallets?.[0]?.address ?? null : null;
+    const solanaUser = isSolanaOrigin ? solanaWallets?.[0]?.address ?? null : null;
+    if ((isSolanaDestination && !solanaRecipient) || (isSolanaOrigin && !solanaUser)) {
+      throw new Error('Missing Solana wallet address for Relay. Connect a Solana wallet in Privy.');
     }
 
     if (!isSolanaOrigin && !evmAddress) {
