@@ -37,3 +37,41 @@ Close behavior:
 When the wallet button is clicked to dismiss the panel stack (toggling `isWalletPanelOpen` off), the code in [`altair_frontend1/src/components/UserMenu.tsx`](../../altair_frontend1/src/components/UserMenu.tsx) only clears the `walletPanels` array if there is exactly **one** panel open at the time of dismissal. If two or more panels are open, the array is left intact.
 
 On the next wallet button click, `initWalletPanels` (in [`altair_frontend1/src/lib/usePanels.ts`](../../altair_frontend1/src/lib/usePanels.ts)) detects `existing.length > 0` and skips re-initialization, so the previous panel configuration (all open chains) is restored. This is intentional: panels remember their state across open/close cycles when more than one panel was open.
+
+---
+
+## Balance update behavior in wallet panels
+
+Wallet panels and the wallet dropdown render from the same balance state (`balancesByChain`) in [`UserMenu.tsx`](../../altair_frontend1/src/components/UserMenu.tsx:37).
+
+### Rendering path
+
+- `renderBalances` drives token rows.
+- `resolveBalanceForSymbol` reads current per-chain token balances.
+- `WalletPanel` receives `renderBalances` as a prop.
+
+This means panel-mode and dropdown-mode are consistent by design.
+
+### Swap/bridge completion flow
+
+When frontend receives `altair:swap-complete`:
+
+1. Immediate local state update is applied for responsiveness.
+2. Affected chain caches are marked stale.
+3. All affected chains are force-refreshed from `/api/balances`.
+
+Reference: [`handleSwapComplete()`](../../altair_frontend1/src/components/UserMenu.tsx:723).
+
+### Why this matters for panel mode
+
+Historically, selected-chain gating could delay destination-chain persistence/reconciliation in panel views for cross-chain operations. Current behavior force-refreshes all chains in `balanceUpdates`, so wallet panels should converge quickly even when the selected chain is different from the swap origin chain.
+
+---
+
+## Panel mode vs durability nuances
+
+- Panel-mode balance changes can appear instantly due to local event-driven updates.
+- Durable Mongo persistence is handled by backend write paths (`/api/balances` reconciliation + relay writeback persistence).
+- Panel rendering is intentionally non-blocking: UI responsiveness first, authoritative convergence shortly after.
+
+For full backend persistence details, see [`Balances.md`](./Balances.md) and [`MongoDB.md`](./MongoDB.md).

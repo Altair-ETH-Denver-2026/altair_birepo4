@@ -8,6 +8,8 @@ import { appendSwapToHistory } from '@/lib/zg-storage';
 import { withWaitLogger } from '@/lib/waitLogger';
 import { syncUserFromAccessToken } from '@/lib/users';
 import { buildCorsHeaders } from '@/lib/appUrls';
+import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService';
+import { CHAINS, type ChainKey } from '../../../../../config/blockchain_config';
 
 const corsHeaders = buildCorsHeaders(null);
 
@@ -85,6 +87,41 @@ const resolveBridgeProviderFee = (params: {
         : typeof params.buyToken.decimals === 'number'
           ? params.buyToken.decimals
           : null,
+  };
+};
+
+const normalizeChainKey = (value: string | null | undefined): ChainKey | null => {
+  if (typeof value !== 'string') return null;
+  const key = value.trim().toUpperCase();
+  if (!key) return null;
+  return key in CHAINS ? (key as ChainKey) : null;
+};
+
+const toBalanceEntryFromRelayToken = (params: {
+  token: RelayWritebackToken;
+  chainKey: ChainKey;
+}): { symbol: string; entry: BalanceEntry } | null => {
+  const symbol = params.token.symbol?.trim().toUpperCase() ?? '';
+  const balanceAfter = params.token.balanceAfter?.trim() ?? '';
+  if (!symbol || !balanceAfter) return null;
+
+  const isSolana = params.chainKey === 'SOLANA_MAINNET' || params.chainKey === 'SOLANA_DEVNET';
+  const decimals = typeof params.token.decimals === 'number'
+    ? params.token.decimals
+    : (isSolana ? 9 : 18);
+  const address = typeof params.token.contractAddress === 'string' ? params.token.contractAddress.trim() : '';
+
+  return {
+    symbol,
+    entry: {
+      symbol,
+      balance: balanceAfter,
+      decimals,
+      name: symbol,
+      address,
+      source: 'blockchain',
+      verifiedAt: Date.now(),
+    },
   };
 };
 
@@ -218,6 +255,54 @@ export async function POST(req: Request) {
       },
       () => Swap.create(swapDoc)
     );
+
+    const sellChainKey = normalizeChainKey(sellToken.chain);
+    const sellBalanceEntry = sellChainKey
+      ? toBalanceEntryFromRelayToken({ token: sellToken, chainKey: sellChainKey })
+      : null;
+    if (sellChainKey && sellBalanceEntry) {
+      try {
+        await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+            target: 'updateBalancesInMongoDB(sellToken)',
+            description: 'relay durable sell-token balance persistence',
+          },
+          () => updateBalancesInMongoDB(user.UID, sellChainKey, { [sellBalanceEntry.symbol]: sellBalanceEntry.entry }, 'blockchain')
+        );
+      } catch (err) {
+        console.warn('[relay/writeback] sell-token balance persistence failed', {
+          uid: user.UID,
+          chain: sellChainKey,
+          symbol: sellBalanceEntry.symbol,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const buyChainKey = normalizeChainKey(buyToken.chain);
+    const buyBalanceEntry = buyChainKey
+      ? toBalanceEntryFromRelayToken({ token: buyToken, chainKey: buyChainKey })
+      : null;
+    if (buyChainKey && buyBalanceEntry) {
+      try {
+        await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+            target: 'updateBalancesInMongoDB(buyToken)',
+            description: 'relay durable buy-token balance persistence',
+          },
+          () => updateBalancesInMongoDB(user.UID, buyChainKey, { [buyBalanceEntry.symbol]: buyBalanceEntry.entry }, 'blockchain')
+        );
+      } catch (err) {
+        console.warn('[relay/writeback] buy-token balance persistence failed', {
+          uid: user.UID,
+          chain: buyChainKey,
+          symbol: buyBalanceEntry.symbol,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     if (payload.cid) {
       await withWaitLogger(

@@ -757,6 +757,12 @@ export default function UserMenu() {
             }
           }
         });
+
+        // Force-refresh every affected chain for durable reconciliation,
+        // independent of currently selectedChain.
+        affectedChains.forEach((chainKey) => {
+          void run({ forceRefresh: true, chainKey });
+        });
       }
 
       if (detail?.chain && detail.chain !== selectedChain) return;
