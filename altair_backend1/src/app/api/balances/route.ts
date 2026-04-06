@@ -243,6 +243,18 @@ const fetchEvmBalancesViaAlchemyPortfolio = async (params: {
       token.tokenAddress === 'NATIVE_TOKEN' ||
       token.tokenAddress === '0x0000000000000000000000000000000000000000';
 
+    const nativeSymbol = GAS_TOKENS[chainKey]?.toUpperCase() ?? 'ETH';
+    const existing = out[chainKey][symbol];
+    const existingIsNative =
+      typeof existing?.address === 'string' &&
+      existing.address.toLowerCase() === NATIVE_EVM_ADDRESS.toLowerCase();
+
+    // Never allow a non-native token with the same symbol (e.g., "ETH")
+    // to overwrite the native gas token entry.
+    if (!isLikelyNative && symbol === nativeSymbol && existingIsNative) {
+      continue;
+    }
+
     out[chainKey][symbol] = {
       symbol,
       name: typeof token?.tokenMetadata?.name === 'string' && token.tokenMetadata.name.length > 0

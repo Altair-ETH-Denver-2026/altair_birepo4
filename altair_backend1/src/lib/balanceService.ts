@@ -1,7 +1,7 @@
 import { User } from '@/models/User';
 import { connectToDatabase } from '@/lib/db';
 import { withWaitLogger } from '@/lib/waitLogger';
-import { ChainKey, DEFAULT_TOKENS, CHAINS } from '../../config/blockchain_config';
+import { ChainKey, DEFAULT_TOKENS, CHAINS, GAS_TOKENS } from '../../config/blockchain_config';
 import * as EthTokens from '../../config/token_info/eth_tokens';
 import * as EthSepoliaTokens from '../../config/token_info/eth_sepolia_testnet_tokens';
 import * as BaseTokens from '../../config/token_info/base_tokens';
@@ -158,17 +158,122 @@ export async function updateBalancesInMongoDB(
       return normalized.length > 0 ? normalized : 'UNKNOWN';
     };
 
-    // Convert to array format
-    const chainBalances: Record<string, any> = {};
-    
+    const isSolanaChain = chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET';
+
+    const normalizeTokenAddress = (value: unknown): string => {
+      if (typeof value !== 'string') return '';
+      const trimmed = value.trim();
+      if (!trimmed) return '';
+      return isSolanaChain ? trimmed : trimmed.toLowerCase();
+    };
+
+    const now = Date.now();
+    const nativeSymbol = sanitizeSymbolForMongoKey(
+      GAS_TOKENS[chainKey] ?? (isSolanaChain ? 'SOL' : 'ETH')
+    );
+
+    const toStoredEntry = (symbol: string, entry: BalanceEntry, fallback?: BalanceEntry): BalanceEntry => {
+      const normalizedAddress = normalizeTokenAddress(entry?.address ?? fallback?.address ?? '');
+      return {
+        ...(fallback ?? {}),
+        ...entry,
+        symbol,
+        ...(normalizedAddress ? { address: normalizedAddress } : { address: '' }),
+        source,
+        verifiedAt: source === 'blockchain' ? now : (entry.verifiedAt ?? fallback?.verifiedAt),
+      };
+    };
+
+    const normalizeExistingChainBalances = (raw: unknown): Record<string, BalanceEntry[]> => {
+      if (!raw || typeof raw !== 'object') return {};
+      const out: Record<string, BalanceEntry[]> = {};
+
+      Object.entries(raw as Record<string, unknown>).forEach(([symbol, value]) => {
+        const safeSymbol = sanitizeSymbolForMongoKey(symbol);
+        if (Array.isArray(value)) {
+          const entries = value
+            .filter((entry): entry is BalanceEntry => Boolean(entry && typeof entry === 'object'))
+            .map((entry) => toStoredEntry(safeSymbol, entry));
+          if (entries.length > 0) out[safeSymbol] = entries;
+          return;
+        }
+
+        if (value && typeof value === 'object') {
+          out[safeSymbol] = [toStoredEntry(safeSymbol, value as BalanceEntry)];
+        }
+      });
+
+      return out;
+    };
+
+    let chainLabel: string;
+    switch (chainKey) {
+      case 'ETH_MAINNET':
+      case 'ETH_SEPOLIA':
+        chainLabel = 'Ethereum';
+        break;
+      case 'BASE_MAINNET':
+      case 'BASE_SEPOLIA':
+        chainLabel = 'Base';
+        break;
+      case 'SOLANA_MAINNET':
+        chainLabel = 'Solana';
+        break;
+      default:
+        chainLabel = chainKey;
+    }
+
+    const existingUser = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/lib/balanceService.ts',
+        target: 'User.findOne',
+        description: 'fetch user for address-aware Mongo balance merge',
+      },
+      () => User.findOne({ UID: uid }).lean()
+    );
+
+    if (!existingUser) {
+      console.warn(`[balances] skipped balance update; user not found for UID ${uid}`);
+      return false;
+    }
+
+    const existingBalances = (existingUser as any).balances as Record<string, unknown> | undefined;
+    const existingChainRaw = existingBalances?.[chainKey] ?? existingBalances?.[chainLabel];
+    const chainBalances = normalizeExistingChainBalances(existingChainRaw);
+
     Object.entries(balances).forEach(([symbol, entry]) => {
       const safeSymbol = sanitizeSymbolForMongoKey(symbol);
-      chainBalances[safeSymbol] = [
-        {
-          ...entry,
-          symbol: sanitizeSymbolForMongoKey(entry?.symbol ?? symbol),
-        },
-      ];
+      const currentEntries = Array.isArray(chainBalances[safeSymbol])
+        ? [...chainBalances[safeSymbol]]
+        : [];
+      const normalizedIncomingAddress = normalizeTokenAddress(entry?.address ?? '');
+      const isNativeWithoutAddress = safeSymbol === nativeSymbol && !normalizedIncomingAddress;
+
+      const matchedIndex = normalizedIncomingAddress
+        ? currentEntries.findIndex((existing) =>
+            normalizeTokenAddress(existing?.address ?? '') === normalizedIncomingAddress
+          )
+        : (isNativeWithoutAddress && currentEntries.length > 0 ? 0 : -1);
+
+      if (matchedIndex >= 0) {
+        currentEntries[matchedIndex] = toStoredEntry(
+          safeSymbol,
+          {
+            ...entry,
+            symbol: safeSymbol,
+          },
+          currentEntries[matchedIndex]
+        );
+      } else {
+        currentEntries.push(
+          toStoredEntry(safeSymbol, {
+            ...entry,
+            symbol: safeSymbol,
+          })
+        );
+      }
+
+      chainBalances[safeSymbol] = currentEntries;
     });
 
     const updateData: any = {
