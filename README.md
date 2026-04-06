@@ -1,169 +1,132 @@
 # Altair - Cryptocurrency Swapping & Bridging with LLM Chat UI
 
-Altair is a modern cryptocurrency swapping and bridging application that allows users to execute transactions through natural language conversations with an AI assistant. The application features embedded wallets, high-accuracy balance tracking, and a modular UI system.
+Altair is a full-stack crypto app that executes swaps/bridges from conversational intents, supports Privy embedded wallets for EVM + Solana, and maintains a multi-layer balance system designed for fast UX plus durable reconciliation.
 
 ## Architecture Overview
 
-The application follows a modern full-stack architecture:
+- **Frontend**: Next.js + TypeScript + React components/hooks in [`altair_frontend1`](altair_frontend1/)
+- **Backend**: Next.js API routes + MongoDB models/services in [`altair_backend1`](altair_backend1/)
+- **Wallet/Auth**: Privy embedded wallet flows via [`privy.ts`](altair_backend1/src/lib/privy.ts)
+- **Balance persistence**: MongoDB `User.balances` + chain verification via [`/api/balances`](altair_backend1/src/app/api/balances/route.ts)
+- **Swap/bridge providers**: EVM paths + Solana paths + Relay bridge flow
 
-- **Frontend**: Next.js with TypeScript, React components, and custom hooks
-- **Backend**: Next.js API routes with MongoDB integration
-- **Key Technologies**: Privy for embedded wallets, MongoDB for balance tracking, 0G storage for chat history, Uniswap/Jupiter for swap execution
+---
 
-## Core Features
+## Core Product Flows
 
-### PANEL System Implementation
+### Chat → intent → execution
 
-The PANEL system is a custom, modular UI system with the following characteristics:
+- Chat orchestration in [`Chat.tsx`](altair_frontend1/src/components/Chat.tsx)
+- Backend chat processing in [`/api/chat`](altair_backend1/src/app/api/chat/route.ts)
+- EVM swap writeback in [`/api/test-swap`](altair_backend1/src/app/api/test-swap/route.ts)
+- Relay bridge/writeback in [`/api/relay/writeback`](altair_backend1/src/app/api/relay/writeback/route.ts)
 
-- **Two Panel Types**: 
-  - `WalletPanel`: Displays balances and allows withdrawals
-  - `AddPanel`: Adds new wallet panel instances
-- **Modular Design**: Base `Panel` component with logo and close functionality
-- **Persistent UI**: Panels don't dismiss on outside clicks (as documented in `Panels.md`)
-- **State Management**: `usePanels` hook manages panel state (`walletPanels`, `isWalletPanelOpen`)
-- **Extensible**: Code is structured to support additional panel types in the future
+### Wallet display modes (panel/dropdown)
 
-### LLM Chat UI & Swap Execution
+- Config-driven by [`WALLET_DISPLAY`](altair_frontend1/config/ui_config.ts)
+- Shared balance render state in [`UserMenu.tsx`](altair_frontend1/src/components/UserMenu.tsx)
+- PANEL behavior documented in [`Panels.md`](altair_backend1/docs/dev_notes/Panels.md)
 
-The chat interface enables natural language cryptocurrency transactions:
+---
 
-- **Natural Language Processing**: Users type intents, AI extracts JSON swap intents
-- **Swap Intent Extraction**: `extractSwapIntent()` function in [`Chat.tsx`](altair_frontend1/src/components/Chat.tsx) parses user messages
-- **AI Integration**: Backend chat API ([`route.ts`](altair_backend1/src/app/api/chat/route.ts)) uses multiple LLM providers (OpenAI, Groq, Anthropic) with fallback
-- **Swap Execution**: 
-  - Uses `/api/test-swap` for EVM chains (Uniswap-like routing)
-  - Uses Jupiter for Solana swaps
-- **Confirmation Flow**: Chat button rows for user confirmation before execution
+## Balance System (Current Behavior)
 
-### Privy Embedded Wallets
+### Three-layer model
 
-Privy integration provides server-side wallet management:
+1. **Frontend immediate state/cache** (fast UI):
+   - in-memory `balancesByChain` + localStorage in [`UserMenu.tsx`](altair_frontend1/src/components/UserMenu.tsx)
+2. **Mongo durable state**:
+   - `User.balances` in [`User.ts`](altair_backend1/src/models/User.ts)
+3. **On-chain verification**:
+   - EVM multi-chain via Alchemy Portfolio and Solana RPC in [`/api/balances`](altair_backend1/src/app/api/balances/route.ts)
 
-- **Server-Side Wallet Management**: [`privy.ts`](altair_backend1/src/lib/privy.ts) handles embedded wallet creation and management
-- **Dual Chain Support**: Functions for both EVM (`getPrivyEvmWalletAddress`) and Solana (`getPrivySolanaWalletAddress`)
-- **No Traditional Web Wallets**: No MetaMask or traditional wallet integration required
-- **Embedded Wallet Creation**: `ensurePrivyEmbeddedEvmWallet` and `ensurePrivyEmbeddedSolanaWallet` create wallets on-demand
+### `/api/balances` strategy
 
-### MongoDB Balance Tracking with Enhanced Accuracy
+- Fast path: return Mongo snapshot first when available, then async verify/write.
+- Force path: fetch on-chain now, return verified payload, write/update Mongo.
+- EVM verification is batched across EVM chains to reduce calls.
 
-The balance tracking system provides higher accuracy than traditional DeFi apps:
+### Collision-safe symbol handling
 
-- **MongoDB as Source of Truth**: User balances stored in MongoDB with chain-specific schemas
-- **Smart Caching Strategy**:
-  - Client-side localStorage caching for immediate UI updates
-  - MongoDB verification with 5-minute staleness threshold (`shouldVerifyBalances`)
-  - Async blockchain verification in background (see [`balances/route.ts`](altair_backend1/src/app/api/balances/route.ts) lines 361-372)
-- **Reduced Blockchain Calls**: Only verifies against blockchain when cache is stale or forced
-- **Balance Verification Logic**: `mergeBalanceUpdates` prioritizes blockchain values over cached values
+- Mongo schema supports `chain -> symbol -> BalanceEntry[]`.
+- Updates are address-aware in [`updateBalancesInMongoDB()`](altair_backend1/src/lib/balanceService.ts), so same-symbol/different-address tokens do not overwrite each other.
+- Default read paths still use index `0` for symbol-level UX compatibility.
+
+### Native token protection
+
+- EVM native token entry is protected from non-native same-symbol overwrite during balance ingestion in [`/api/balances`](altair_backend1/src/app/api/balances/route.ts).
+
+### Swap-complete behavior
+
+- Frontend dispatches `altair:swap-complete` from swap/relay flows (immediate local update).
+- Wallet logic applies instant updates and now force-refreshes all affected chains for faster durable convergence in [`handleSwapComplete()`](altair_frontend1/src/components/UserMenu.tsx).
+- Relay writeback now also persists `sellToken` and `buyToken` `balanceAfter` snapshots directly to `User.balances` in [`/api/relay/writeback`](altair_backend1/src/app/api/relay/writeback/route.ts).
+
+For full details, see:
+- [`Balances.md`](altair_backend1/docs/dev_notes/Balances.md)
+- [`MongoDB.md`](altair_backend1/docs/dev_notes/MongoDB.md)
+- [`Panels.md`](altair_backend1/docs/dev_notes/Panels.md)
+
+---
 
 ## Project Structure
 
 ```
 altair_birepo4/
-├── altair_backend1/          # Backend API server
-│   ├── src/app/api/         # API routes
-│   ├── src/lib/             # Shared libraries
-│   ├── src/models/          # MongoDB models
-│   └── config/              # Configuration files
-├── altair_frontend1/        # Frontend UI
-│   ├── src/app/            # Next.js app router
-│   ├── src/components/     # React components
-│   ├── src/lib/            # Frontend libraries
-│   └── config/             # UI configuration
-└── README.md               # This file
+├── altair_backend1/
+│   ├── src/app/api/
+│   ├── src/lib/
+│   ├── src/models/
+│   ├── config/
+│   └── docs/dev_notes/
+├── altair_frontend1/
+│   ├── src/app/
+│   ├── src/components/
+│   ├── src/lib/
+│   └── config/
+└── README.md
 ```
 
-## Getting Started
+---
+
+## Setup
 
 ### Prerequisites
 
-- Node.js 18+ 
-- MongoDB instance
-- Privy account for embedded wallets
-- API keys for LLM providers (OpenAI, Groq, or Anthropic)
+- Node.js 18+
+- MongoDB
+- Privy credentials
+- Required API keys (LLM + chain providers)
 
-### Backend Setup
+### Backend
 
-1. Navigate to `altair_backend1/`:
-   ```bash
-   cd altair_backend1
-   ```
+```bash
+cd altair_backend1
+corepack yarn install
+corepack yarn dev
+```
 
-2. Install dependencies:
-   ```bash
-   corepack yarn install
-   ```
+### Frontend
 
-3. Configure environment variables:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys and configuration
-   ```
+```bash
+cd altair_frontend1
+corepack yarn install
+corepack yarn dev
+```
 
-4. Run the backend:
-   ```bash
-   corepack yarn dev
-   ```
-   Backend runs at `http://localhost:3001`
+---
 
-### Frontend Setup
+## Key Files
 
-1. Navigate to `altair_frontend1/`:
-   ```bash
-   cd altair_frontend1
-   ```
+- Balance API: [`altair_backend1/src/app/api/balances/route.ts`](altair_backend1/src/app/api/balances/route.ts)
+- Balance persistence service: [`altair_backend1/src/lib/balanceService.ts`](altair_backend1/src/lib/balanceService.ts)
+- Relay writeback: [`altair_backend1/src/app/api/relay/writeback/route.ts`](altair_backend1/src/app/api/relay/writeback/route.ts)
+- Wallet UI state/reconciliation: [`altair_frontend1/src/components/UserMenu.tsx`](altair_frontend1/src/components/UserMenu.tsx)
+- Relay execution flow: [`altair_frontend1/src/lib/useRelay.ts`](altair_frontend1/src/lib/useRelay.ts)
 
-2. Install dependencies:
-   ```bash
-   corepack yarn install
-   ```
+---
 
-3. Configure environment variables:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
+## Developer Notes
 
-4. Run the frontend:
-   ```bash
-   corepack yarn dev
-   ```
-   Frontend runs at `http://localhost:3000`
-
-## Key Configuration Files
-
-- **Backend Configuration**:
-  - [`config/blockchain_config.ts`](altair_backend1/config/blockchain_config.ts): Chain and token configurations
-  - [`config/ai_config.ts`](altair_backend1/config/ai_config.ts): LLM provider settings
-  - [`config/mongodb_config.ts`](altair_backend1/config/mongodb_config.ts): Database configuration
-
-- **Frontend Configuration**:
-  - [`config/ui_config.ts`](altair_frontend1/config/ui_config.ts): UI styling and panel configuration
-  - [`config/chain_info.ts`](altair_frontend1/config/chain_info.ts): Chain information for frontend
-  - [`config/external_links.ts`](altair_frontend1/config/external_links.ts): External resource links
-
-## Development Notes
-
-- **PANEL System Documentation**: Detailed documentation available in [`altair_backend1/docs/dev_notes/Panels.md`](altair_backend1/docs/dev_notes/Panels.md)
-- **Balance Tracking**: The system minimizes blockchain calls by using MongoDB as the source of truth with periodic verification
-- **Swap Execution**: Supports both EVM chains (via Uniswap-like routing) and Solana (via Jupiter)
-- **Chat History**: Persisted using 0G decentralized storage for user memory and conversation history
-
-## API Endpoints
-
-### Backend API Routes
-
-- `POST /api/chat` - Process chat messages and execute swap intents
-- `POST /api/balances` - Retrieve and verify user balances
-- `POST /api/test-swap` - Execute test swaps (EVM chains)
-- `POST /api/auth/login` - User authentication
-- `POST /api/user/sync` - User data synchronization
-
-## License
-
-[Add appropriate license information]
-
-## Support
-
-For issues and feature requests, please use the project's issue tracker.
+- Diagnostics are developer/operator-facing (logs/telemetry), not user-facing product messaging.
+- Frontend updates are intentionally fast; authoritative persistence converges through backend write/verification paths.
