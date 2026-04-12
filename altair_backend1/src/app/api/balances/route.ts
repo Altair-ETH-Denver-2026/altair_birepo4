@@ -13,7 +13,7 @@ import {
   SOLANA_DEVNET,
   resolveRpcUrls,
 } from '../../../../config/chain_info';
-import type { ApiBalancesResponse, ApiTokenBalance } from '../../../../config/balance_types';
+import type { ApiBalancesResponse, ApiTokenBalance } from '@/lib/balanceTypes';
 import { getPrivyEvmWalletAddress, getPrivySolanaWalletAddress } from '@/lib/privy';
 import {
   getBalancesFromMongoDB,

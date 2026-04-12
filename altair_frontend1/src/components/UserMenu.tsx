@@ -24,7 +24,7 @@ import * as BaseSepoliaTokens from '../../config/token_info/base_testnet_sepolia
 import * as EthTokens from '../../config/token_info/eth_tokens';
 import * as EthSepoliaTokens from '../../config/token_info/eth_sepolia_testnet_tokens';
 import * as SolanaTokens from '../../config/token_info/solana_tokens';
-import type { ApiChainBalances, ApiTokenBalance } from '../../config/balance_types';
+import type { ApiChainBalances, ApiTokenBalance } from '../lib/balanceTypes';
 import { normalizeBalancesResponse, resolveTokenRowsForChain } from '../lib/balanceTransforms';
 import { ACTIVE_NETWORK_DROPDOWN, ADD_PANEL_DISPLAY, BALANCE_DECIMALS, CHAIN_OPTIONS, MENU_ICONS, WALLET_DISPLAY } from '../../config/ui_config';
 

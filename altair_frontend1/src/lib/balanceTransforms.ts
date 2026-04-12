@@ -1,5 +1,5 @@
 import type { ChainKey } from '../../config/blockchain_config';
-import type { ApiBalancesResponse, ApiChainBalances } from '../../config/balance_types';
+import type { ApiBalancesResponse, ApiChainBalances } from './balanceTypes';
 
 export const normalizeBalancesResponse = (params: {
   chainKey: ChainKey;
@@ -46,4 +46,3 @@ export const resolveTokenRowsForChain = (
 
   return Object.keys(balancesByChain[chainKey]?.tokens ?? {}).map((token) => token.toUpperCase());
 };
-

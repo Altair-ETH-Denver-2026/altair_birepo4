@@ -249,9 +249,33 @@ export const useRelay = () => {
     const serialized = err ? JSON.stringify(err) : '';
     const hasJupiterLog = logs?.some((line) => line.includes('JUP6LkbZ') || line.includes('Jupiter'));
     if (!hasJupiterLog && !serialized.includes('0x1788') && !serialized.includes('6024')) return null;
-    return new Error(
+    const next = new Error(
       'Relay Solana route failed inside Jupiter (program error 0x1788). This usually means the Solana swap route is unavailable for the requested amount/token. Try a different amount/token or wait for liquidity to improve.'
     );
+    next.name = 'RelayJupiterRouteError';
+    return next;
+  };
+
+  const isJupiterRouteError = (err: unknown): boolean => {
+    const message = err instanceof Error ? `${err.name} ${err.message}` : String(err ?? '');
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes('relayjupiterrouteerror') ||
+      normalized.includes('0x1788') ||
+      normalized.includes('6024') ||
+      normalized.includes('jupiter')
+    );
+  };
+
+  const applyBpsReduction = (rawAmount: string, bps: number): string => {
+    try {
+      const amount = BigInt(rawAmount);
+      const clampedBps = Math.max(0, Math.min(9_999, Number.isFinite(bps) ? Math.floor(bps) : 0));
+      const next = (amount * BigInt(10_000 - clampedBps)) / 10_000n;
+      return next > 0n ? next.toString() : '1';
+    } catch {
+      return rawAmount;
+    }
   };
 
   const ensureEvmChainForTx = async (params: {
@@ -560,6 +584,10 @@ export const useRelay = () => {
     }
 
     const amountBase = toBaseUnits(intent.amount, originToken.decimals);
+    const solanaRequoteReductionBps = [0, 100, 250] as const;
+    let solanaRequoteReductionIndex = 0;
+    let currentQuoteAmountRaw = amountBase;
+    let executedSellAmountRaw = amountBase;
     console.log('[Relay] amount conversion', {
       amount: intent.amount,
       decimals: originToken.decimals,
@@ -604,13 +632,12 @@ export const useRelay = () => {
       accessToken: cachedToken,
     });
 
-    const relayRequest: RelayQuoteRequest = {
+    const relayRequestBase: Omit<RelayQuoteRequest, 'amount'> = {
       user: isSolanaOrigin ? solanaUser ?? '' : evmAddress ?? '',
       originChainId,
       destinationChainId,
       originCurrency,
       destinationCurrency,
-      amount: amountBase,
       tradeType: 'EXACT_INPUT',
       recipient: isSolanaDestination && solanaRecipient ? solanaRecipient : evmAddress ?? '',
       forceSolverExecution: true,
@@ -629,7 +656,6 @@ export const useRelay = () => {
           }
         : {}),
     };
-    console.log('[Relay] quote request', relayRequest);
 
     const maxQuoteAttempts = 3;
     const maxQuoteAgeMs = 12_000;
@@ -639,6 +665,16 @@ export const useRelay = () => {
     let totalRelayGasPaidRaw = 0n;
 
     for (let quoteAttempt = 1; quoteAttempt <= maxQuoteAttempts; quoteAttempt += 1) {
+      const relayRequest: RelayQuoteRequest = {
+        ...relayRequestBase,
+        amount: currentQuoteAmountRaw,
+      };
+
+      console.log('[Relay] quote request', {
+        ...relayRequest,
+        jupiterReductionBps: solanaRequoteReductionBps[Math.min(solanaRequoteReductionIndex, solanaRequoteReductionBps.length - 1)],
+      });
+
       relayQuote = await withWaitLogger(
         {
           file: 'altair_frontend1/src/lib/useRelay.ts',
@@ -681,6 +717,7 @@ export const useRelay = () => {
       });
 
       let shouldRetryWithFreshQuote = false;
+      let shouldReduceSolanaInputForRetry = false;
 
       for (const step of relayQuote.steps) {
         if (step.kind === 'signature') {
@@ -735,10 +772,19 @@ export const useRelay = () => {
                 console.warn('[Relay] Solana simulation error', sim.value.err, sim.value.logs ?? []);
                 const jupiterError = buildJupiterError(sim.value.err, sim.value.logs);
                 if (jupiterError) throw jupiterError;
+                throw new Error(`Relay Solana simulation returned error: ${JSON.stringify(sim.value.err)}`);
               }
             } catch (err) {
               console.warn('[Relay] Solana simulation failed', err);
+              if (isJupiterRouteError(err) && quoteAttempt < maxQuoteAttempts) {
+                shouldRetryWithFreshQuote = true;
+                shouldReduceSolanaInputForRetry = true;
+                break;
+              }
+              throw err;
             }
+
+            if (shouldRetryWithFreshQuote) break;
 
             const { signature } = await withWaitLogger(
               {
@@ -848,10 +894,19 @@ export const useRelay = () => {
                 console.warn('[Relay] Solana simulation error', sim.value.err, sim.value.logs ?? []);
                 const jupiterError = buildJupiterError(sim.value.err, sim.value.logs);
                 if (jupiterError) throw jupiterError;
+                throw new Error(`Relay Solana simulation returned error: ${JSON.stringify(sim.value.err)}`);
               }
             } catch (err) {
               console.warn('[Relay] Solana simulation failed', err);
+              if (isJupiterRouteError(err) && quoteAttempt < maxQuoteAttempts) {
+                shouldRetryWithFreshQuote = true;
+                shouldReduceSolanaInputForRetry = true;
+                break;
+              }
+              throw err;
             }
+
+            if (shouldRetryWithFreshQuote) break;
             const serialized = versionedTx.serialize();
             const { signature } = await withWaitLogger(
               {
@@ -901,10 +956,19 @@ export const useRelay = () => {
                 console.warn('[Relay] Solana simulation error', sim.value.err, sim.value.logs ?? []);
                 const jupiterError = buildJupiterError(sim.value.err, sim.value.logs);
                 if (jupiterError) throw jupiterError;
+                throw new Error(`Relay Solana simulation returned error: ${JSON.stringify(sim.value.err)}`);
               }
             } catch (err) {
               console.warn('[Relay] Solana simulation failed', err);
+              if (isJupiterRouteError(err) && quoteAttempt < maxQuoteAttempts) {
+                shouldRetryWithFreshQuote = true;
+                shouldReduceSolanaInputForRetry = true;
+                break;
+              }
+              throw err;
             }
+
+            if (shouldRetryWithFreshQuote) break;
             const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
             const { signature } = await withWaitLogger(
               {
@@ -1119,18 +1183,29 @@ export const useRelay = () => {
 
         if (shouldRetryWithFreshQuote) break;
         }
+
+        if (shouldRetryWithFreshQuote) break;
       }
 
       if (shouldRetryWithFreshQuote) {
-        console.warn('[Relay] re-quoting after retryable EVM failure on last tx attempt', {
+        if (isSolanaOrigin && shouldReduceSolanaInputForRetry) {
+          const nextIndex = Math.min(solanaRequoteReductionIndex + 1, solanaRequoteReductionBps.length - 1);
+          solanaRequoteReductionIndex = nextIndex;
+          currentQuoteAmountRaw = applyBpsReduction(amountBase, solanaRequoteReductionBps[nextIndex]);
+        }
+
+        console.warn('[Relay] re-quoting after retryable tx failure', {
           quoteAttempt,
           maxQuoteAttempts,
           requestId,
+          currentQuoteAmountRaw,
+          jupiterReductionBps: solanaRequoteReductionBps[Math.min(solanaRequoteReductionIndex, solanaRequoteReductionBps.length - 1)],
         });
         await wait(350 * quoteAttempt + randomJitter(200));
         continue;
       }
 
+      executedSellAmountRaw = currentQuoteAmountRaw;
       break;
     }
 
@@ -1210,7 +1285,7 @@ export const useRelay = () => {
       buyBalanceBeforeRaw,
       buyBalanceAfterRaw,
       computedBuyBalanceAfterRaw,
-      sellAmountRaw: amountBase,
+      sellAmountRaw: executedSellAmountRaw,
       buyAmountRaw,
       totalRelayGasPaidRaw: totalRelayGasPaidRaw.toString(),
     });
@@ -1247,7 +1322,7 @@ export const useRelay = () => {
         cid: cid ?? null,
         intentString: intent.type,
         sellToken: {
-          amount: amountBase,
+          amount: executedSellAmountRaw,
           decimals: originToken.decimals,
           symbol: originToken.symbol ?? intent.sell,
           contractAddress: originToken.address,
