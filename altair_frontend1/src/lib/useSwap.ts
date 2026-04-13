@@ -3,7 +3,7 @@
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { ethers } from 'ethers';
 import { withWaitLogger } from './waitLogger';
-import { BLOCKCHAIN, CHAINS, type ChainKey } from '@config/blockchain_config';
+import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '@config/blockchain_config';
 import { BASE_MAINNET, BASE_SEPOLIA, ETH_MAINNET, ETH_SEPOLIA, resolveRpcUrls } from '@config/chain_info';
 
 const chainConfigs = {
@@ -30,6 +30,54 @@ export const resolveSelectedChain = (explicitChain?: ChainKey) => {
   const stored = localStorage.getItem('selectedChain');
   if (stored && stored in CHAINS) return stored as ChainKey;
   return BLOCKCHAIN;
+};
+
+export const readCachedTokenSnapshot = (params: {
+  chainKey: ChainKey;
+  walletAddress: string | null | undefined;
+  symbol: string;
+}): { raw: string | null; decimals: number | null } => {
+  const { chainKey, walletAddress, symbol } = params;
+  if (typeof window === 'undefined') return { raw: null, decimals: null };
+  if (!walletAddress) return { raw: null, decimals: null };
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  if (!normalizedSymbol) return { raw: null, decimals: null };
+
+  const cacheKey = `cached:balances:${chainKey}:${walletAddress}`;
+  const raw = localStorage.getItem(cacheKey);
+  if (!raw) return { raw: null, decimals: null };
+
+  try {
+    const payload = JSON.parse(raw) as {
+      source?: 'cache' | 'mongo' | 'blockchain' | 'stale';
+      tokens?: Record<string, { symbol?: string; balance?: unknown; decimals?: unknown }>;
+    };
+    if (payload?.source === 'stale') return { raw: null, decimals: null };
+    const tokens = payload?.tokens;
+    if (!tokens || typeof tokens !== 'object') return { raw: null, decimals: null };
+
+    const direct = tokens[normalizedSymbol];
+    const bySymbol = direct ?? Object.values(tokens).find((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const candidate = (entry as { symbol?: unknown }).symbol;
+      return typeof candidate === 'string' && candidate.trim().toUpperCase() === normalizedSymbol;
+    });
+
+    if (!bySymbol || typeof bySymbol !== 'object') return { raw: null, decimals: null };
+    const decimals = typeof bySymbol.decimals === 'number' ? bySymbol.decimals : null;
+    if (decimals === null || decimals < 0) return { raw: null, decimals: null };
+
+    const human = bySymbol.balance;
+    if (typeof human === 'number' && Number.isFinite(human) && human >= 0) {
+      return { raw: ethers.parseUnits(human.toString(), decimals).toString(), decimals };
+    }
+    if (typeof human === 'string' && human.trim().length > 0) {
+      return { raw: ethers.parseUnits(human.trim(), decimals).toString(), decimals };
+    }
+    return { raw: null, decimals };
+  } catch {
+    return { raw: null, decimals: null };
+  }
 };
 
 const ensureEvmChain = async (
@@ -147,6 +195,10 @@ export const useSwap = (explicitChain?: ChainKey) => {
       const amountWei = ethers.parseEther(sellAmount);
 
       const effectiveSell = normalizedSell;
+      const gasSymbol = (GAS_TOKENS[selectedChain] ?? 'ETH').toUpperCase();
+      const sellSnapshot = readCachedTokenSnapshot({ chainKey: selectedChain, walletAddress: recipient, symbol: effectiveSell });
+      const buySnapshot = readCachedTokenSnapshot({ chainKey: selectedChain, walletAddress: recipient, symbol: normalizedBuy });
+      const gasSnapshot = readCachedTokenSnapshot({ chainKey: selectedChain, walletAddress: recipient, symbol: gasSymbol });
 
       const routeResponse = await withWaitLogger(
         {
@@ -166,6 +218,13 @@ export const useSwap = (explicitChain?: ChainKey) => {
               amount: sellAmount,
               recipient,
               CID: CID ?? null,
+              balanceSnapshots: {
+                sellTokenBeforeRaw: sellSnapshot.raw,
+                buyTokenBeforeRaw: buySnapshot.raw,
+                gasTokenBeforeRaw: gasSnapshot.raw,
+                gasTokenSymbol: gasSymbol,
+                gasTokenDecimals: gasSnapshot.decimals,
+              },
             }),
           })
       );
@@ -254,8 +313,8 @@ export const useSwap = (explicitChain?: ChainKey) => {
           target: '/api/test-swap writeback',
           description: 'swap writeback after confirmation',
         },
-        () =>
-          fetch('/api/test-swap', {
+        async () => {
+          const writebackRes = await fetch('/api/test-swap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
@@ -267,16 +326,43 @@ export const useSwap = (explicitChain?: ChainKey) => {
               recipient,
               CID: CID ?? null,
               txHash: tx.hash,
+              balanceSnapshots: {
+                sellTokenBeforeRaw: sellSnapshot.raw,
+                buyTokenBeforeRaw: buySnapshot.raw,
+                gasTokenBeforeRaw: gasSnapshot.raw,
+                gasTokenSymbol: gasSymbol,
+                gasTokenDecimals: gasSnapshot.decimals,
+              },
             }),
-          })
+          });
+          const writebackPayload = await writebackRes.json().catch(() => ({} as {
+            error?: string;
+            balanceUpdates?: Array<{ chain: ChainKey; symbol: string; balanceAfterRaw: string | null; decimals: number }>;
+          }));
+          if (!writebackRes.ok) {
+            throw new Error(
+              typeof writebackPayload?.error === 'string'
+                ? writebackPayload.error
+                : 'Swap writeback failed'
+            );
+          }
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('altair:swap-complete', {
+                detail: {
+                  chain: selectedChain,
+                  sellToken: effectiveSell,
+                  buyToken: normalizedBuy,
+                  balanceUpdates: Array.isArray(writebackPayload?.balanceUpdates)
+                    ? writebackPayload.balanceUpdates
+                    : [],
+                },
+              })
+            );
+          }
+        }
       );
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(
-          new CustomEvent('altair:swap-complete', {
-            detail: { chain: selectedChain, sellToken: effectiveSell, buyToken: normalizedBuy },
-          })
-        );
-      }
       return tx.hash as string;
     });
 };

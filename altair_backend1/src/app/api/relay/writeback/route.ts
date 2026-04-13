@@ -24,7 +24,13 @@ type RelayWritebackToken = {
   balanceBefore?: string | null;
   balanceAfter?: string | null;
   fees?: {
-    gas?: { token?: string | null; amount?: string | null; decimals?: number | null } | null;
+    gas?: {
+      token?: string | null;
+      amount?: string | null;
+      decimals?: number | null;
+      balanceBefore?: string | null;
+      balanceAfter?: string | null;
+    } | null;
     provider?: { token?: string | null; amount?: string | null; decimals?: number | null } | null;
     altair?: { token?: string | null; amount?: string | null; decimals?: number | null } | null;
   } | null;
@@ -299,6 +305,45 @@ export async function POST(req: Request) {
           uid: user.UID,
           chain: buyChainKey,
           symbol: buyBalanceEntry.symbol,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    const gasSymbol = payload.sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
+    const gasBalanceAfter = payload.sellToken.fees?.gas?.balanceAfter?.trim() ?? '';
+    const gasBalanceBefore = payload.sellToken.fees?.gas?.balanceBefore?.trim() ?? '';
+    const gasDecimals = typeof payload.sellToken.fees?.gas?.decimals === 'number'
+      ? payload.sellToken.fees?.gas?.decimals
+      : null;
+    const sellSymbolNormalized = sellToken.symbol?.trim().toUpperCase() ?? '';
+
+    if (sellChainKey && gasSymbol && gasBalanceAfter && gasSymbol !== sellSymbolNormalized) {
+      try {
+        const gasEntry: BalanceEntry = {
+          symbol: gasSymbol,
+          balance: gasBalanceAfter,
+          decimals: gasDecimals ?? (sellChainKey === 'SOLANA_MAINNET' || sellChainKey === 'SOLANA_DEVNET' ? 9 : 18),
+          name: gasSymbol,
+          address: '',
+          source: 'blockchain',
+          verifiedAt: Date.now(),
+        };
+        await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+            target: 'updateBalancesInMongoDB(gasToken)',
+            description: 'relay durable gas-token balance persistence',
+          },
+          () => updateBalancesInMongoDB(user.UID, sellChainKey, { [gasSymbol]: gasEntry }, 'blockchain')
+        );
+      } catch (err) {
+        console.warn('[relay/writeback] gas-token balance persistence failed', {
+          uid: user.UID,
+          chain: sellChainKey,
+          symbol: gasSymbol,
+          balanceBefore: gasBalanceBefore || null,
+          balanceAfter: gasBalanceAfter || null,
           error: err instanceof Error ? err.message : String(err),
         });
       }

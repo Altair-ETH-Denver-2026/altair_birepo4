@@ -72,6 +72,13 @@ Main endpoint: [`POST` in `/api/balances`](../../src/app/api/balances/route.ts).
 
 ### 4.2 Read strategy
 
+Route behavior is built around a one-read snapshot model:
+
+1. Read `UID.balances` from Mongo once.
+2. Build in-memory snapshot by chain from that single read.
+3. Run verification against that snapshot (no additional Mongo reads in verification path).
+4. Persist chain updates with snapshot writeback.
+
 If Mongo has chain balances and request is not `forceRefresh`:
 
 1. Return immediate Mongo payload quickly.
@@ -86,8 +93,26 @@ If no immediate Mongo path (or `forceRefresh`):
 ### 4.3 EVM verification path
 
 - Uses Alchemy Portfolio tokens-by-wallet for multi-chain fetch in one request (performance optimization).
+- The one-call endpoint is used as a broad portfolio aggregator, not as a strict per-token completeness guarantee.
 - Parses per-chain token balances and updates tracked/seeded symbols (+ native symbol).
 - Prevents non-native same-symbol token overwrite of native gas token entry.
+
+#### 4.3.1 Missing-token fallback (new)
+
+Nuance added in the current implementation:
+
+- We still make one Alchemy portfolio call first.
+- Then, for tracked seed symbols that were not returned by Alchemy for a chain, we run deterministic direct RPC fallback reads:
+  - Native token via `getBalance`.
+  - ERC-20 via `decimals` + `balanceOf`.
+
+This closes the gap where a tracked token (for example `BASE_MAINNET.USDC`) might be absent in `data.tokens` for a specific portfolio response and therefore miss reconciliation.
+
+Resulting EVM strategy is now:
+
+1. One multi-chain Alchemy call.
+2. Per-chain fallback only for missing tracked symbols.
+3. Snapshot writeback to Mongo with reconciled balances.
 
 ### 4.4 Solana verification path
 

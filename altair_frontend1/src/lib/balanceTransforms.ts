@@ -46,3 +46,4 @@ export const resolveTokenRowsForChain = (
 
   return Object.keys(balancesByChain[chainKey]?.tokens ?? {}).map((token) => token.toUpperCase());
 };
+

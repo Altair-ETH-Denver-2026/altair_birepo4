@@ -505,6 +505,7 @@ export default function UserMenu() {
   };
   const balanceCacheTtlMs = 30_000;
   const inFlightBalanceKey = useRef<string | null>(null);
+  const loginPreloadKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (Object.keys(withdrawReceipt).length === 0) return;
@@ -579,10 +580,14 @@ export default function UserMenu() {
     });
   };
 
-  const loadCachedBalances = (cacheKey: string, chainKey: ChainKey, solanaAddressValue?: string | null) => {
-    if (typeof window === 'undefined') return false;
+  const loadCachedBalances = (
+    cacheKey: string,
+    chainKey: ChainKey,
+    solanaAddressValue?: string | null
+  ): { hit: boolean; stale: boolean } => {
+    if (typeof window === 'undefined') return { hit: false, stale: false };
     const raw = localStorage.getItem(cacheKey);
-    if (!raw) return false;
+    if (!raw) return { hit: false, stale: false };
     try {
       const cached = JSON.parse(raw) as {
         timestamp: number;
@@ -593,12 +598,10 @@ export default function UserMenu() {
         address?: string;
         solanaAddress?: string;
       };
-      if (!cached?.timestamp || !cached.tokens) return false;
-      
-      // Check if cache is marked as stale (e.g., from swap completion)
+      if (!cached?.timestamp || !cached.tokens) return { hit: false, stale: false };
+
       const isStale = cached.source === 'stale';
-      if (isStale) return false;
-      
+
       // No TTL check - cache persists indefinitely
       applyBalanceSnapshot(
         chainKey,
@@ -612,9 +615,9 @@ export default function UserMenu() {
         },
         solanaAddressValue
       );
-      return true;
+      return { hit: true, stale: isStale };
     } catch {
-      return false;
+      return { hit: false, stale: false };
     }
   };
 
@@ -670,7 +673,19 @@ export default function UserMenu() {
 
   const fetchBalancesForChain = async (
     chainKey: ChainKey,
-    { forceRefresh, skipNetworkIfCached = false }: { forceRefresh: boolean; skipNetworkIfCached?: boolean }
+    {
+      forceRefresh,
+      skipNetworkIfCached = false,
+      skipAsyncVerification = false,
+      includeAllChains = false,
+      refreshSelectedChain = false,
+    }: {
+      forceRefresh: boolean;
+      skipNetworkIfCached?: boolean;
+      skipAsyncVerification?: boolean;
+      includeAllChains?: boolean;
+      refreshSelectedChain?: boolean;
+    }
   ) => {
     if (!authenticated) return;
 
@@ -695,10 +710,10 @@ export default function UserMenu() {
     const cacheKey = `cached:balances:${chainKey}:${chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET' ? solanaAddressValue : cachedAddress ?? 'unknown'}`;
     
     // Step 1: Always try to load cached balances for immediate UI display
-    let cacheHit = false;
+    let cacheState: { hit: boolean; stale: boolean } = { hit: false, stale: false };
     if (!forceRefresh) {
-      cacheHit = loadCachedBalances(cacheKey, chainKey, solanaAddressValue);
-      if (cacheHit && skipNetworkIfCached) {
+      cacheState = loadCachedBalances(cacheKey, chainKey, solanaAddressValue);
+      if (cacheState.hit && skipNetworkIfCached && !cacheState.stale) {
         return;
       }
       // Don't return - we still want to trigger async verification
@@ -724,6 +739,9 @@ export default function UserMenu() {
               ...(token ? { accessToken: token } : {}),
               chain: chainKey,
               ...(forceRefresh ? { forceRefresh: true } : {}),
+              ...(skipAsyncVerification ? { skipAsyncVerification: true } : {}),
+              ...(includeAllChains ? { includeAllChains: true } : {}),
+              ...(refreshSelectedChain ? { refreshSelectedChain: true } : {}),
               walletAddress: chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET' ? solanaAddressValue ?? undefined : cachedAddress ?? undefined,
             }),
           })
@@ -737,6 +755,79 @@ export default function UserMenu() {
         },
         () => res.json()
       );
+
+      const applyAndCacheChainPayload = (targetChainKey: ChainKey, payload: unknown) => {
+        const fallbackAddress = targetChainKey === 'SOLANA_MAINNET' || targetChainKey === 'SOLANA_DEVNET'
+          ? (solanaWallets[0]?.address ?? cachedSolana ?? null)
+          : null;
+        const normalizedByChain = normalizeBalancesResponse({
+          chainKey: targetChainKey,
+          payload,
+          fallbackSolanaAddress: fallbackAddress,
+        });
+        const normalizedTokensByChain = normalizedByChain.tokens ?? {};
+
+        applyBalanceSnapshot(
+          targetChainKey,
+          {
+            tokens: normalizedTokensByChain,
+            address: normalizedByChain.address,
+            solanaAddress: normalizedByChain.solanaAddress,
+            source: normalizedByChain.source,
+            verifiedAt: normalizedByChain.verifiedAt,
+            timestamp: normalizedByChain.timestamp,
+          },
+          fallbackAddress
+        );
+
+        if (typeof window !== 'undefined') {
+          const addressForCache = targetChainKey === 'SOLANA_MAINNET' || targetChainKey === 'SOLANA_DEVNET'
+            ? (normalizedByChain.solanaAddress ?? fallbackAddress ?? 'unknown')
+            : (normalizedByChain.address ?? cachedAddress ?? 'unknown');
+          const perChainCacheKey = `cached:balances:${targetChainKey}:${addressForCache}`;
+          localStorage.setItem(
+            perChainCacheKey,
+            JSON.stringify({
+              chain: targetChainKey,
+              tokens: normalizedTokensByChain,
+              address: normalizedByChain.address,
+              solanaAddress: normalizedByChain.solanaAddress ?? fallbackAddress ?? undefined,
+              timestamp: normalizedByChain.timestamp ?? Date.now(),
+              verifiedAt: normalizedByChain.verifiedAt ?? Date.now(),
+              source: normalizedByChain.source ?? 'blockchain',
+            })
+          );
+        }
+
+        return normalizedByChain;
+      };
+
+      const allChainsPayloadRaw =
+        data && typeof data === 'object' && (data as Record<string, unknown>).allChains
+          ? ((data as Record<string, unknown>).allChains as Partial<Record<ChainKey, unknown>>)
+          : null;
+
+      if (allChainsPayloadRaw && includeAllChains) {
+        const chainKeys = Object.keys(CHAINS) as ChainKey[];
+        chainKeys.forEach((targetChainKey) => {
+          const payloadForChain = allChainsPayloadRaw[targetChainKey];
+          if (!payloadForChain) return;
+          applyAndCacheChainPayload(targetChainKey, payloadForChain);
+        });
+
+        if (!forceRefresh && !skipAsyncVerification) {
+          window.setTimeout(() => {
+            void fetchBalancesForChain(chainKey, {
+              forceRefresh: false,
+              skipNetworkIfCached: false,
+              skipAsyncVerification: true,
+              includeAllChains: true,
+            });
+          }, 1500);
+        }
+
+        return;
+      }
 
       const normalized = normalizeBalancesResponse({
         chainKey,
@@ -771,14 +862,20 @@ export default function UserMenu() {
           })
         );
       }
+
+      if (!forceRefresh && !skipAsyncVerification && normalized.source === 'mongo') {
+        window.setTimeout(() => {
+          void fetchBalancesForChain(chainKey, {
+            forceRefresh: false,
+            skipNetworkIfCached: false,
+            skipAsyncVerification: true,
+          });
+        }, 1500);
+      }
     } catch {
-      setBalancesByChain((prev) => ({
-        ...prev,
-        [chainKey]: {
-          ...(prev[chainKey] ?? {}),
-          tokens: {},
-        },
-      }));
+      // Preserve last-known snapshot on network/parse failures.
+      // If local cache exists, re-apply it; otherwise keep current in-memory state untouched.
+      void loadCachedBalances(cacheKey, chainKey, solanaAddressValue);
     } finally {
       if (inFlightBalanceKey.current === cacheKey) {
         inFlightBalanceKey.current = null;
@@ -882,12 +979,19 @@ export default function UserMenu() {
       forceRefresh,
       chainKey,
       skipNetworkIfCached = false,
+      skipAsyncVerification = false,
+      includeAllChains = false,
+      refreshSelectedChain = false,
     }: {
       forceRefresh: boolean;
       chainKey: ChainKey;
       skipNetworkIfCached?: boolean;
+      skipAsyncVerification?: boolean;
+      includeAllChains?: boolean;
+      refreshSelectedChain?: boolean;
     }) => {
       if (!authenticated) {
+        loginPreloadKeyRef.current = null;
         setEvmAddress('');
         setSolanaAddress('');
         setBalancesByChain({} as Record<ChainKey, ApiChainBalances>);
@@ -899,17 +1003,33 @@ export default function UserMenu() {
         return;
       }
 
-      await fetchBalancesForChain(chainKey, { forceRefresh, skipNetworkIfCached });
+      await fetchBalancesForChain(chainKey, {
+        forceRefresh,
+        skipNetworkIfCached,
+        skipAsyncVerification,
+        includeAllChains,
+        refreshSelectedChain,
+      });
     };
 
     const preloadAllChainsOnLogin = async () => {
-      const chainKeys = activeNetworkOptions.map((option) => option.key);
-      if (chainKeys.length === 0) return;
-      await Promise.all(
-        chainKeys.map(async (chainKey) => {
-          await run({ forceRefresh: false, chainKey });
-        })
-      );
+      const preloadIdentityKey = [
+        selectedChain,
+        wallets[0]?.address ?? '',
+        solanaWallets[0]?.address ?? '',
+      ].join('|');
+
+      if (loginPreloadKeyRef.current === preloadIdentityKey) return;
+      loginPreloadKeyRef.current = preloadIdentityKey;
+
+      const firstChain = selectedChain;
+      await run({
+        forceRefresh: false,
+        chainKey: firstChain,
+        includeAllChains: true,
+        skipAsyncVerification: true,
+        refreshSelectedChain: true,
+      });
     };
 
     // Login/refresh preload across all chains so every token in Mongo-backed balances is cached client-side.
@@ -965,12 +1085,15 @@ export default function UserMenu() {
         // Force-refresh every affected chain for durable reconciliation,
         // independent of currently selectedChain.
         affectedChains.forEach((chainKey) => {
-          void run({ forceRefresh: true, chainKey });
+          void run({ forceRefresh: false, chainKey, skipAsyncVerification: true });
         });
       }
 
-      if (detail?.chain && detail.chain !== selectedChain) return;
-      void run({ forceRefresh: true, chainKey: selectedChain });
+      if (detail?.chain) {
+        void run({ forceRefresh: false, chainKey: detail.chain, skipAsyncVerification: true });
+        if (detail.chain !== selectedChain) return;
+      }
+      void run({ forceRefresh: false, chainKey: selectedChain, skipAsyncVerification: true });
     };
 
     if (typeof window !== 'undefined') {

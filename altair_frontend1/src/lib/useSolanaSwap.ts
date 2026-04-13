@@ -5,8 +5,9 @@ import bs58 from 'bs58';
 import { withWaitLogger } from './waitLogger';
 import { usePrivy } from '@privy-io/react-auth';
 import { useWallets, useSignAndSendTransaction } from '@privy-io/react-auth/solana';
-import { resolveSelectedChain } from './useSwap';
+import { readCachedTokenSnapshot, resolveSelectedChain } from './useSwap';
 import type { ChainKey } from '../../config/blockchain_config';
+import { GAS_TOKENS } from '../../config/blockchain_config';
 
 /**
  * Hook to execute a swap on Solana mainnet via Jupiter Swap API.
@@ -206,31 +207,78 @@ export function useSolanaSwap(explicitChain?: ChainKey) {
           })
       );
       const txHash = typeof signature === 'string' ? signature : bs58.encode(signature);
-
-      void fetch('/api/test-swap', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          chain: 'SOLANA_MAINNET',
-          sellToken: sellToken.toUpperCase(),
-          buyToken: buyToken.toUpperCase(),
-          amount: sellAmount,
-          recipient,
-          CID: CID ?? null,
-          txHash,
-        }),
-      }).catch((err) => {
-        console.warn('[Solana Swap] swap writeback failed', err);
+      const sellSnapshot = readCachedTokenSnapshot({
+        chainKey: 'SOLANA_MAINNET',
+        walletAddress: recipient,
+        symbol: sellToken.toUpperCase(),
       });
+      const buySnapshot = readCachedTokenSnapshot({
+        chainKey: 'SOLANA_MAINNET',
+        walletAddress: recipient,
+        symbol: buyToken.toUpperCase(),
+      });
+      const gasSymbol = (GAS_TOKENS.SOLANA_MAINNET ?? 'SOL').toUpperCase();
+      const gasSnapshot = readCachedTokenSnapshot({
+        chainKey: 'SOLANA_MAINNET',
+        walletAddress: recipient,
+        symbol: gasSymbol,
+      });
+
+      const writebackRes = await withWaitLogger(
+        {
+          file: 'altair_frontend1/src/lib/useSolanaSwap.ts',
+          target: '/api/test-swap writeback',
+          description: 'Solana swap writeback after confirmation',
+        },
+        () =>
+          fetch('/api/test-swap', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+            },
+            credentials: 'include',
+            body: JSON.stringify({
+              chain: 'SOLANA_MAINNET',
+              sellToken: sellToken.toUpperCase(),
+              buyToken: buyToken.toUpperCase(),
+              amount: sellAmount,
+              recipient,
+              CID: CID ?? null,
+              txHash,
+              balanceSnapshots: {
+                sellTokenBeforeRaw: sellSnapshot.raw,
+                buyTokenBeforeRaw: buySnapshot.raw,
+                gasTokenBeforeRaw: gasSnapshot.raw,
+                gasTokenSymbol: gasSymbol,
+                gasTokenDecimals: gasSnapshot.decimals,
+              },
+            }),
+          })
+      );
+      const writebackPayload = await writebackRes.json().catch(() => ({} as {
+        error?: string;
+        balanceUpdates?: Array<{ chain: ChainKey; symbol: string; balanceAfterRaw: string | null; decimals: number }>;
+      }));
+      if (!writebackRes.ok) {
+        throw new Error(
+          typeof writebackPayload?.error === 'string'
+            ? writebackPayload.error
+            : 'Solana swap writeback failed'
+        );
+      }
 
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
           new CustomEvent('altair:swap-complete', {
-            detail: { chain: 'SOLANA_MAINNET', sellToken: sellToken.toUpperCase(), buyToken: buyToken.toUpperCase() },
+            detail: {
+              chain: 'SOLANA_MAINNET',
+              sellToken: sellToken.toUpperCase(),
+              buyToken: buyToken.toUpperCase(),
+              balanceUpdates: Array.isArray(writebackPayload?.balanceUpdates)
+                ? writebackPayload.balanceUpdates
+                : [],
+            },
           })
         );
       }

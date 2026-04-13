@@ -70,8 +70,17 @@ export default function Chat() {
   const [pendingIntent, setPendingIntent] = useState<SwapIntent | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowActionsInFlightRef = useRef<Set<string>>(new Set());
+  const inFlightClientRequestIdsRef = useRef<Set<string>>(new Set());
+  const sendInFlightRef = useRef(false);
   const typingSpeedMs = CHAT_PANEL.typingSpeedMs;
   const logoAsset = useLogoAsset();
+
+  const createClientRequestId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -480,8 +489,9 @@ export default function Chat() {
   const requestChatResponse = async (params: {
     userMessage: string;
     history: Message[];
+    clientRequestId: string;
   }): Promise<{ content: string; zgHash?: string | null; zgError?: string | null; cid?: string | null }> => {
-    const { userMessage, history } = params;
+    const { userMessage, history, clientRequestId } = params;
     const privyAccessToken = authenticated
       ? await withWaitLogger(
           {
@@ -501,54 +511,29 @@ export default function Chat() {
       hasAccessToken: Boolean(privyAccessToken),
     });
 
-    const maxAttempts = 3;
-    let response: Response | null = null;
-    let lastError: unknown = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        response = await withWaitLogger(
-          {
-            file: 'altair_frontend1/src/components/Chat.tsx',
-            target: '/api/chat',
-            description: 'chat response',
-          },
-          () =>
-            fetch('/api/chat', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                message: userMessage,
-                history: history.map((m) => ({ role: m.role, content: m.content })),
-                accessToken: privyAccessToken ?? null,
-                selectedChain: resolveSelectedChain(),
-                solanaAddress: solanaWallets?.[0]?.address ?? null,
-              }),
-            })
-        );
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Chat request failed with status ${response.status}: ${errorText}`);
-        }
-        break;
-      } catch (err) {
-        lastError = err;
-        console.warn('[0G][frontend] chat request failed', { attempt, error: err });
-        if (attempt < maxAttempts) {
-          await withWaitLogger(
-            {
-              file: 'altair_frontend1/src/components/Chat.tsx',
-              target: 'retry backoff',
-              description: `waiting before chat retry ${attempt + 1}`,
-            },
-            () => new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
-          );
-        }
-      }
-    }
-
-    if (!response) {
-      throw lastError ?? new Error('Chat request failed after retries');
+    const response = await withWaitLogger(
+      {
+        file: 'altair_frontend1/src/components/Chat.tsx',
+        target: '/api/chat',
+        description: 'chat response',
+      },
+      () =>
+        fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: userMessage,
+            history: history.map((m) => ({ role: m.role, content: m.content })),
+            accessToken: privyAccessToken ?? null,
+            selectedChain: resolveSelectedChain(),
+            solanaAddress: solanaWallets?.[0]?.address ?? null,
+            clientRequestId,
+          }),
+        })
+    );
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Chat request failed with status ${response.status}: ${errorText}`);
     }
 
     const responseText = await withWaitLogger(
@@ -604,7 +589,17 @@ export default function Chat() {
     allowAutoExecution: boolean;
   }) => {
     const { userMessage, appendUserMessage, allowAutoExecution } = params;
+    if (sendInFlightRef.current) {
+      return;
+    }
+    sendInFlightRef.current = true;
     const historySnapshot = messages;
+    const clientRequestId = createClientRequestId();
+    if (inFlightClientRequestIdsRef.current.has(clientRequestId)) {
+      sendInFlightRef.current = false;
+      return;
+    }
+    inFlightClientRequestIdsRef.current.add(clientRequestId);
 
     if (appendUserMessage) {
       setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
@@ -612,7 +607,7 @@ export default function Chat() {
 
     setIsLoading(true);
     try {
-      const data = await requestChatResponse({ userMessage, history: historySnapshot });
+      const data = await requestChatResponse({ userMessage, history: historySnapshot, clientRequestId });
       const intent = extractSwapIntent(data.content);
       if (intent && intent.type === 'SINGLE_CHAIN_SWAP_INTENT') {
         await prefetchSolanaTokensForIntent(intent);
@@ -680,6 +675,8 @@ export default function Chat() {
     } catch (error) {
       console.error('Chat error:', error);
     } finally {
+      inFlightClientRequestIdsRef.current.delete(clientRequestId);
+      sendInFlightRef.current = false;
       setIsLoading(false);
     }
   };

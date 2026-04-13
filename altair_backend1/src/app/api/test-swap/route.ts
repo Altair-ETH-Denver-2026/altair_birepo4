@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { ethers } from 'ethers';
 import { Connection, PublicKey, VersionedTransactionResponse } from '@solana/web3.js';
-import { BLOCKCHAIN, CHAINS, type ChainKey } from '../../../../config/blockchain_config';
+import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '../../../../config/blockchain_config';
 import {
   BASE_MAINNET,
   BASE_SEPOLIA,
@@ -23,6 +23,7 @@ import { appendSwapToHistory } from '@/lib/zg-storage';
 import { connectToDatabase } from '@/lib/db';
 import { syncUserFromAccessToken } from '@/lib/users';
 import { withWaitLogger } from '@/lib/waitLogger';
+import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService';
 import { Swap } from '@/models/Swap';
 import { Chat } from '@/models/Chat';
 import { generateSwapID } from '@/lib/id';
@@ -817,7 +818,7 @@ const applyTokenEnvOverrides = (chainKey: ChainKey, tokens: Record<string, Token
 
 export async function POST(req: Request) {
   try {
-    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody } = (await req
+    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody, balanceSnapshots } = (await req
       .json()
       .catch(() => ({
         chain: null,
@@ -828,6 +829,7 @@ export async function POST(req: Request) {
         txHash: null,
         CID: null,
         provider: null,
+        balanceSnapshots: null,
       }))) as {
       chain?: ChainKey | null;
       buyToken?: string | null;
@@ -837,6 +839,13 @@ export async function POST(req: Request) {
       txHash?: string | null;
       CID?: string | null;
       provider?: string | null;
+      balanceSnapshots?: {
+        sellTokenBeforeRaw?: string | null;
+        buyTokenBeforeRaw?: string | null;
+        gasTokenBeforeRaw?: string | null;
+        gasTokenSymbol?: string | null;
+        gasTokenDecimals?: number | null;
+      } | null;
     };
 
     const resolvedChainKey: ChainKey =
@@ -1063,10 +1072,29 @@ export async function POST(req: Request) {
           solanaTx: buyAmountResult.solanaTx ?? null,
         })
       );
-      let sellBalanceBefore: string | null = null;
-      let buyBalanceBefore: string | null = null;
+      let sellBalanceBefore: string | null =
+        typeof balanceSnapshots?.sellTokenBeforeRaw === 'string' && balanceSnapshots.sellTokenBeforeRaw.trim().length > 0
+          ? balanceSnapshots.sellTokenBeforeRaw.trim()
+          : null;
+      let buyBalanceBefore: string | null =
+        typeof balanceSnapshots?.buyTokenBeforeRaw === 'string' && balanceSnapshots.buyTokenBeforeRaw.trim().length > 0
+          ? balanceSnapshots.buyTokenBeforeRaw.trim()
+          : null;
+      const gasTokenSymbol =
+        typeof balanceSnapshots?.gasTokenSymbol === 'string' && balanceSnapshots.gasTokenSymbol.trim().length > 0
+          ? balanceSnapshots.gasTokenSymbol.trim().toUpperCase()
+          : (GAS_TOKENS[resolvedChainKey] ?? (isSolana ? 'SOL' : 'ETH')).toUpperCase();
+      const gasTokenBefore =
+        typeof balanceSnapshots?.gasTokenBeforeRaw === 'string' && balanceSnapshots.gasTokenBeforeRaw.trim().length > 0
+          ? balanceSnapshots.gasTokenBeforeRaw.trim()
+          : null;
+      const gasTokenDecimals =
+        typeof balanceSnapshots?.gasTokenDecimals === 'number' && Number.isFinite(balanceSnapshots.gasTokenDecimals)
+          ? balanceSnapshots.gasTokenDecimals
+          : (gasTokenSymbol === 'SOL' ? 9 : 18);
       let sellBalanceAfter: string | null = null;
       let buyBalanceAfter: string | null = null;
+      let gasBalanceAfter: string | null = null;
       try {
         const user = await withWaitLogger(
           {
@@ -1076,26 +1104,31 @@ export async function POST(req: Request) {
           },
           () => syncUserFromAccessToken(accessToken, { mode: 'runtime' })
         );
-        const userBalances = (user as { balances?: Record<string, unknown> }).balances;
-        sellBalanceBefore = resolveBalanceBefore({
-          userBalances,
-          chainKey: resolvedChainKey,
-          symbol: normalizedSellToken,
-        });
-        buyBalanceBefore = resolveBalanceBefore({
-          userBalances,
-          chainKey: resolvedChainKey,
-          symbol: normalizedBuyToken,
-        });
         const gasFeeRaw = gasFee?.amount ? BigInt(gasFee.amount) : 0n;
-        const shouldApplyGasToSell = normalizedSellToken === 'ETH' || normalizedSellToken === 'SOL';
+        const shouldApplyGasToSell = normalizedSellToken === gasTokenSymbol;
+        const shouldApplyGasToBuy = normalizedBuyToken === gasTokenSymbol;
         sellBalanceAfter =
           sellBalanceBefore !== null && sellAmountRaw !== null
             ? (BigInt(sellBalanceBefore) - BigInt(sellAmountRaw) - (shouldApplyGasToSell ? gasFeeRaw : 0n)).toString()
             : null;
         buyBalanceAfter =
           buyBalanceBefore !== null
-            ? (BigInt(buyBalanceBefore) + BigInt(buyAmountRaw)).toString()
+            ? (() => {
+                const gross = BigInt(buyBalanceBefore) + BigInt(buyAmountRaw);
+                const net = shouldApplyGasToBuy ? gross - gasFeeRaw : gross;
+                return (net < 0n ? 0n : net).toString();
+              })()
+            : null;
+        gasBalanceAfter =
+          gasTokenBefore !== null
+            ? (shouldApplyGasToSell && sellBalanceAfter !== null
+              ? sellBalanceAfter
+              : (shouldApplyGasToBuy && buyBalanceAfter !== null
+                ? buyBalanceAfter
+              : (() => {
+                  const next = BigInt(gasTokenBefore) - gasFeeRaw;
+                  return (next < 0n ? 0n : next).toString();
+                })()))
             : null;
         await withWaitLogger(
           {
@@ -1198,6 +1231,64 @@ export async function POST(req: Request) {
               }
             )
         );
+
+        const sellEntryAddress = resolvedChainKey === 'SOLANA_MAINNET'
+          ? tokenConfig[normalizedSellToken]?.address ?? ''
+          : normalizedSellToken === 'ETH'
+            ? ''
+            : resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? '';
+        const buyEntryAddress = resolvedChainKey === 'SOLANA_MAINNET'
+          ? tokenConfig[normalizedBuyToken]?.address ?? ''
+          : resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? '';
+        const gasEntryAddress = gasTokenSymbol === 'SOL'
+          ? tokenConfig.SOL?.address ?? ''
+          : '';
+
+        const mongoBalanceUpdates: Record<string, BalanceEntry> = {};
+        if (sellBalanceAfter !== null) {
+          mongoBalanceUpdates[normalizedSellToken] = {
+            symbol: normalizedSellToken,
+            balance: sellBalanceAfter,
+            decimals: typeof sellDecimals === 'number' ? sellDecimals : (isSolana ? 9 : 18),
+            name: normalizedSellToken,
+            address: sellEntryAddress,
+            source: 'blockchain',
+            verifiedAt: Date.now(),
+          };
+        }
+        if (buyBalanceAfter !== null) {
+          mongoBalanceUpdates[normalizedBuyToken] = {
+            symbol: normalizedBuyToken,
+            balance: buyBalanceAfter,
+            decimals: typeof buyDecimals === 'number' ? buyDecimals : (isSolana ? 9 : 18),
+            name: normalizedBuyToken,
+            address: buyEntryAddress,
+            source: 'blockchain',
+            verifiedAt: Date.now(),
+          };
+        }
+        if (gasBalanceAfter !== null && !(gasTokenSymbol in mongoBalanceUpdates)) {
+          mongoBalanceUpdates[gasTokenSymbol] = {
+            symbol: gasTokenSymbol,
+            balance: gasBalanceAfter,
+            decimals: gasTokenDecimals,
+            name: gasTokenSymbol,
+            address: gasEntryAddress,
+            source: 'blockchain',
+            verifiedAt: Date.now(),
+          };
+        }
+
+        if (Object.keys(mongoBalanceUpdates).length > 0) {
+          await withWaitLogger(
+            {
+              file: 'altair_backend1/src/app/api/test-swap/route.ts',
+              target: 'updateBalancesInMongoDB',
+              description: 'durable sell/buy/gas balance persistence',
+            },
+            () => updateBalancesInMongoDB(user.UID, resolvedChainKey, mongoBalanceUpdates, 'blockchain')
+          );
+        }
       } catch (dbErr) {
         console.warn('[test-swap] swap db write failed', dbErr);
       }
@@ -1264,7 +1355,39 @@ export async function POST(req: Request) {
         } catch (zgErr) {
           console.warn('[test-swap] swap 0G write failed', zgErr);
         }
-      return NextResponse.json({ ok: true, txHash, buyAmount });
+      const shouldEmitGasUpdate =
+        gasBalanceAfter !== null &&
+        gasTokenSymbol !== normalizedSellToken &&
+        gasTokenSymbol !== normalizedBuyToken;
+
+      const balanceUpdates = [
+        sellBalanceAfter !== null
+          ? {
+              chain: resolvedChainKey,
+              symbol: normalizedSellToken,
+              balanceAfterRaw: sellBalanceAfter,
+              decimals: sellDecimals,
+            }
+          : null,
+        buyBalanceAfter !== null
+          ? {
+              chain: resolvedChainKey,
+              symbol: normalizedBuyToken,
+              balanceAfterRaw: buyBalanceAfter,
+              decimals: buyDecimals,
+            }
+          : null,
+        shouldEmitGasUpdate
+          ? {
+              chain: resolvedChainKey,
+              symbol: gasTokenSymbol,
+              balanceAfterRaw: gasBalanceAfter,
+              decimals: gasTokenDecimals,
+            }
+          : null,
+      ].filter((entry): entry is { chain: ChainKey; symbol: string; balanceAfterRaw: string; decimals: number } => Boolean(entry));
+
+      return NextResponse.json({ ok: true, txHash, buyAmount, balanceUpdates });
     }
 
     if (isSolana) {
