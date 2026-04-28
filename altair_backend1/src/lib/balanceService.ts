@@ -1,7 +1,7 @@
 import { User } from '@/models/User';
 import { connectToDatabase } from '@/lib/db';
 import { withWaitLogger } from '@/lib/waitLogger';
-import { ChainKey, DEFAULT_TOKENS, CHAINS, GAS_TOKENS } from '../../config/blockchain_config';
+import { ChainKey, DEFAULT_TOKENS, CHAINS, GAS_TOKENS, BALANCE_RULES } from '../../config/blockchain_config';
 import * as EthTokens from '../../config/token_info/eth_tokens';
 import * as EthSepoliaTokens from '../../config/token_info/eth_sepolia_testnet_tokens';
 import * as BaseTokens from '../../config/token_info/base_tokens';
@@ -498,24 +498,34 @@ export async function getUIDFromAccessToken(accessToken: string): Promise<string
 
 /**
  * Check if balances need verification (stale or never verified)
+ * Checks individual token verifiedAt timestamps
  */
 export function shouldVerifyBalances(
   balances: Record<string, BalanceEntry> | null,
-  maxAgeMs: number = 5 * 60 * 1000 // 5 minutes default
+  maxAgeMs: number = BALANCE_RULES.staleness.staleTimer // Use configured stale timer
 ): boolean {
   if (!balances) {
     return true; // No balances, need verification
   }
 
-  // Check metadata for last verification
-  const metadata = (balances as any).$metadata;
-  if (metadata?.lastBlockchainVerification) {
-    const lastVerification = new Date(metadata.lastBlockchainVerification).getTime();
-    const now = Date.now();
-    return (now - lastVerification) > maxAgeMs;
+  const now = Date.now();
+  
+  // Check if any token needs verification
+  for (const [symbol, entry] of Object.entries(balances)) {
+    if (!entry.verifiedAt) {
+      // Token has never been verified
+      return true;
+    }
+    
+    const timeSinceVerification = now - entry.verifiedAt;
+    if (timeSinceVerification > maxAgeMs) {
+      // Token verification is stale
+      return true;
+    }
   }
-
-  return true; // No verification timestamp, need verification
+  
+  // All tokens have been verified recently
+  return false;
 }
 
 /**

@@ -12,6 +12,7 @@ import { useSwap } from '../lib/useSwap';
 import { useSolanaSwap } from '../lib/useSolanaSwap';
 import { useRelay } from '../lib/useRelay';
 import { getCachedPrivyAccessToken } from '../lib/privyTokenCache';
+import { dispatchSwapInitiated } from '../lib/eventTypes';
 import { BLOCKCHAIN, CHAINS, type ChainKey } from '../../config/blockchain_config';
 import * as SolanaTokens from '../../config/token_info/solana_tokens';
 import { CHAT_PANEL } from '../../config/ui_config';
@@ -609,6 +610,32 @@ export default function Chat() {
     try {
       const data = await requestChatResponse({ userMessage, history: historySnapshot, clientRequestId });
       const intent = extractSwapIntent(data.content);
+      
+      // Dispatch swap-initiated event when AI generates a swap intent
+      if (intent && intent.type) {
+        const selectedChain = resolveIntentChain(intent);
+        
+        // Helper to normalize chain string to ChainKey
+        const normalizeToChainKey = (chainStr: string | null | undefined, fallback: ChainKey): ChainKey => {
+          if (!chainStr) return fallback;
+          const chainKeys = Object.keys(CHAINS) as ChainKey[];
+          if (chainKeys.includes(chainStr as ChainKey)) return chainStr as ChainKey;
+          const normalized = chainStr.trim().toUpperCase();
+          if (chainKeys.includes(normalized as ChainKey)) return normalized as ChainKey;
+          return fallback;
+        };
+        
+        dispatchSwapInitiated({
+          sellToken: intent.sell?.toUpperCase() || '',
+          buyToken: intent.buy?.toUpperCase() || '',
+          sellChain: normalizeToChainKey(intent.sellTokenChain, selectedChain),
+          buyChain: normalizeToChainKey(intent.buyTokenChain, selectedChain),
+          amount: intent.amount?.toString() || '',
+          intentType: intent.type,
+          timestamp: Date.now(),
+        });
+      }
+      
       if (intent && intent.type === 'SINGLE_CHAIN_SWAP_INTENT') {
         await prefetchSolanaTokensForIntent(intent);
       }

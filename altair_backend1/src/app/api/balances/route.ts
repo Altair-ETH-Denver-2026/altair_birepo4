@@ -3,7 +3,7 @@ import { createPublicClient, http } from 'viem';
 import { baseSepolia } from 'viem/chains';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { cookies } from 'next/headers';
-import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '../../../../config/blockchain_config';
+import { BLOCKCHAIN, CHAINS, GAS_TOKENS, BALANCE_RULES, type ChainKey } from '../../../../config/blockchain_config';
 import {
   BASE_MAINNET,
   BASE_SEPOLIA,
@@ -19,6 +19,7 @@ import {
   getAllUserTokens,
   getUIDFromAccessToken,
   updateBalancesSnapshotInMongoDB,
+  shouldVerifyBalances,
   type BalanceEntry,
 } from '@/lib/balanceService';
 import { getUserUIDFromAccessTokenByMode } from '@/lib/users';
@@ -248,12 +249,12 @@ const fetchEvmBalancesViaAlchemyPortfolio = async (params: {
     const targetSymbol = matchedByAddress ?? (trackedSymbols.has(symbol) ? symbol : null);
 
     if (!targetSymbol) {
-      console.log('[balances] EVM token skipped (not in tracked seed set)', {
-        chainKey,
-        network: networkRaw,
-        symbol,
-        tokenAddress: token?.tokenAddress,
-      });
+      // console.log('[balances] EVM token skipped (not in tracked seed set)', {
+      //   chainKey,
+      //   network: networkRaw,
+      //   symbol,
+      //   tokenAddress: token?.tokenAddress,
+      // });
       continue;
     } else {
       console.log('[balances] EVM token to update', {
@@ -405,90 +406,110 @@ async function fetchBlockchainBalancesDynamic(params: {
   const output: Record<string, BalanceEntry> = {};
 
   if (isSolanaChain(chainKey)) {
-    const solanaConfig = chainKey === 'SOLANA_MAINNET' ? SOLANA_MAINNET : SOLANA_DEVNET;
-    const solanaRpcUrls = resolveRpcUrls(solanaConfig.rpcUrls);
-    const solanaRpcUrl = solanaRpcUrls[0] ?? solanaConfig.rpcUrls[0];
-    const connection = new Connection(solanaRpcUrl, 'confirmed');
-    const owner = new PublicKey(walletAddress);
-    const balancesByMint = new Map<string, { amount: bigint; decimals: number }>();
+    try {
+      const solanaConfig = chainKey === 'SOLANA_MAINNET' ? SOLANA_MAINNET : SOLANA_DEVNET;
+      const solanaRpcUrls = resolveRpcUrls(solanaConfig.rpcUrls);
+      const solanaRpcUrl = solanaRpcUrls[0] ?? solanaConfig.rpcUrls[0];
+      const connection = new Connection(solanaRpcUrl, 'confirmed');
+      const owner = new PublicKey(walletAddress);
+      const balancesByMint = new Map<string, { amount: bigint; decimals: number }>();
 
-    const tokenProgramIds = [
-      'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-      'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
-    ];
+      const tokenProgramIds = [
+        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+        'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
+      ];
 
-    for (const programId of tokenProgramIds) {
-      try {
-        const tokenAccounts = await connection.getParsedTokenAccountsByOwner(owner, { programId: new PublicKey(programId) });
-        tokenAccounts.value.forEach((tokenAccount) => {
-          const parsed = tokenAccount.account.data;
-          if (!('parsed' in parsed)) return;
-          const mint = parsed.parsed?.info?.mint;
-          const amount = parsed.parsed?.info?.tokenAmount?.amount;
-          const decimals = parsed.parsed?.info?.tokenAmount?.decimals;
-          if (typeof mint !== 'string' || typeof amount !== 'string') return;
-          const current = balancesByMint.get(mint);
-          const nextAmount = BigInt(amount);
-          const nextDecimals = typeof decimals === 'number' ? decimals : (current?.decimals ?? 0);
-          balancesByMint.set(mint, {
-            amount: (current?.amount ?? 0n) + nextAmount,
-            decimals: nextDecimals,
+      for (const programId of tokenProgramIds) {
+        try {
+          const tokenAccounts = await connection.getParsedTokenAccountsByOwner(owner, { programId: new PublicKey(programId) });
+          tokenAccounts.value.forEach((tokenAccount) => {
+            const parsed = tokenAccount.account.data;
+            if (!('parsed' in parsed)) return;
+            const mint = parsed.parsed?.info?.mint;
+            const amount = parsed.parsed?.info?.tokenAmount?.amount;
+            const decimals = parsed.parsed?.info?.tokenAmount?.decimals;
+            if (typeof mint !== 'string' || typeof amount !== 'string') return;
+            const current = balancesByMint.get(mint);
+            const nextAmount = BigInt(amount);
+            const nextDecimals = typeof decimals === 'number' ? decimals : (current?.decimals ?? 0);
+            balancesByMint.set(mint, {
+              amount: (current?.amount ?? 0n) + nextAmount,
+              decimals: nextDecimals,
+            });
           });
-        });
-      } catch {
-        // Ignore token-program specific failures and continue with whatever data is available.
+        } catch {
+          // Ignore token-program specific failures and continue with whatever data is available.
+        }
       }
-    }
 
-    for (const symbol of tokenSymbols) {
-      const seed = seedBalances[symbol] ?? seedBalances[symbol.toUpperCase()];
-      const seedDecimals = typeof seed?.decimals === 'number' ? seed.decimals : undefined;
-      const seedAddress = typeof seed?.address === 'string' ? seed.address : '';
-      const isNative = symbol === nativeSymbol;
+      for (const symbol of tokenSymbols) {
+        const seed = seedBalances[symbol] ?? seedBalances[symbol.toUpperCase()];
+        const seedDecimals = typeof seed?.decimals === 'number' ? seed.decimals : undefined;
+        const seedAddress = typeof seed?.address === 'string' ? seed.address : '';
+        const isNative = symbol === nativeSymbol;
 
-      if (isNative) {
-        const lamports = await connection.getBalance(owner);
+        if (isNative) {
+          try {
+            const lamports = await connection.getBalance(owner);
+            output[symbol] = {
+              symbol,
+              name: seed?.name ?? symbol,
+              address: seedAddress,
+              decimals: seedDecimals ?? 9,
+              balance: lamports.toString(),
+              source: 'blockchain',
+              verifiedAt: Date.now(),
+            };
+          } catch (error) {
+            console.warn(`[balances] Solana native balance fetch failed for ${walletAddress}:`, error instanceof Error ? error.message : String(error));
+            // Return zero balance as fallback
+            output[symbol] = {
+              symbol,
+              name: seed?.name ?? symbol,
+              address: seedAddress,
+              decimals: seedDecimals ?? 9,
+              balance: '0',
+              source: 'blockchain',
+              verifiedAt: Date.now(),
+            };
+          }
+          continue;
+        }
+
+        if (!seedAddress) {
+          output[symbol] = {
+            symbol,
+            name: seed?.name ?? symbol,
+            address: '',
+            decimals: seedDecimals ?? 0,
+            balance: '0',
+            source: 'blockchain',
+            verifiedAt: Date.now(),
+          };
+          continue;
+        }
+
+        const mintAggregate = balancesByMint.get(seedAddress);
+        const raw = (mintAggregate?.amount ?? 0n).toString();
+        const decimals = mintAggregate?.decimals ?? seedDecimals ?? 0;
+
         output[symbol] = {
           symbol,
           name: seed?.name ?? symbol,
           address: seedAddress,
-          decimals: seedDecimals ?? 9,
-          balance: lamports.toString(),
+          decimals,
+          balance: raw,
           source: 'blockchain',
           verifiedAt: Date.now(),
         };
-        continue;
       }
 
-      if (!seedAddress) {
-        output[symbol] = {
-          symbol,
-          name: seed?.name ?? symbol,
-          address: '',
-          decimals: seedDecimals ?? 0,
-          balance: '0',
-          source: 'blockchain',
-          verifiedAt: Date.now(),
-        };
-        continue;
-      }
-
-      const mintAggregate = balancesByMint.get(seedAddress);
-      const raw = (mintAggregate?.amount ?? 0n).toString();
-      const decimals = mintAggregate?.decimals ?? seedDecimals ?? 0;
-
-      output[symbol] = {
-        symbol,
-        name: seed?.name ?? symbol,
-        address: seedAddress,
-        decimals,
-        balance: raw,
-        source: 'blockchain',
-        verifiedAt: Date.now(),
-      };
+      return output;
+    } catch (error) {
+      console.warn(`[balances] Solana balance fetch failed for chain ${chainKey}, wallet ${walletAddress}:`, error instanceof Error ? error.message : String(error));
+      // Return empty output on complete failure
+      return {};
     }
-
-    return output;
   }
 
   const chainConfig = chainInfoByKey[chainKey];
@@ -850,27 +871,31 @@ export async function POST(req: Request) {
       });
 
       if (uid && !shouldSkipAsyncVerification) {
-        void (async () => {
-          try {
-            if (useEvmPortfolioPath) {
-              const verifiedByChain = await fetchEvmBalancesViaAlchemyPortfolio({
-                walletAddress,
-                chainKeys: evmChainKeys,
-                seedByChain: mongoByChain,
-              });
-              await updateBalancesSnapshotInMongoDB(uid, verifiedByChain, 'blockchain');
-            } else {
-              const verifiedBalances = await fetchBlockchainBalancesDynamic({
-                chainKey: resolvedChainKey,
-                walletAddress,
-                seedBalances: mongoBalances,
-              });
-              await updateBalancesSnapshotInMongoDB(uid, { [resolvedChainKey]: verifiedBalances }, 'blockchain');
+        // Check if balances need verification based on staleness
+        const needsVerification = shouldVerifyBalances(mongoBalances, BALANCE_RULES.staleness.staleTimer);
+        if (needsVerification) {
+          void (async () => {
+            try {
+              if (useEvmPortfolioPath) {
+                const verifiedByChain = await fetchEvmBalancesViaAlchemyPortfolio({
+                  walletAddress,
+                  chainKeys: evmChainKeys,
+                  seedByChain: mongoByChain,
+                });
+                await updateBalancesSnapshotInMongoDB(uid, verifiedByChain, 'blockchain');
+              } else {
+                const verifiedBalances = await fetchBlockchainBalancesDynamic({
+                  chainKey: resolvedChainKey,
+                  walletAddress,
+                  seedBalances: mongoBalances,
+                });
+                await updateBalancesSnapshotInMongoDB(uid, { [resolvedChainKey]: verifiedBalances }, 'blockchain');
+              }
+            } catch (err) {
+              console.warn('[balances] async verification failed', err);
             }
-          } catch (err) {
-            console.warn('[balances] async verification failed', err);
-          }
-        })();
+          })();
+        }
       }
 
       return NextResponse.json(immediatePayload, withCors());
@@ -880,41 +905,47 @@ export async function POST(req: Request) {
     const blockchainBalances = await (useEvmPortfolioPath
       ? (() => {
         const chainSeedByKey: Partial<Record<ChainKey, Record<string, BalanceEntry>>> = {
-            ...mongoByChain,
-            [resolvedChainKey]: seed,
-          };
-          return fetchEvmBalancesViaAlchemyPortfolio({
-            walletAddress,
-            chainKeys: evmChainKeys,
-            seedByChain: chainSeedByKey,
-          }).then((all) => all[resolvedChainKey] ?? {});
-        })()
-      : fetchBlockchainBalancesDynamic({
-          chainKey: resolvedChainKey,
+          ...mongoByChain,
+          [resolvedChainKey]: seed,
+        };
+        return fetchEvmBalancesViaAlchemyPortfolio({
           walletAddress,
-          seedBalances: seed,
-        }));
+          chainKeys: evmChainKeys,
+          seedByChain: chainSeedByKey,
+        }).then((all) => all[resolvedChainKey] ?? {});
+      })()
+      : fetchBlockchainBalancesDynamic({
+        chainKey: resolvedChainKey,
+        walletAddress,
+        seedBalances: seed,
+      }));
 
     if (uid) {
-      if (useEvmPortfolioPath && !shouldSkipAsyncVerification) {
-        void (async () => {
-          try {
-            const verifiedByChain = await fetchEvmBalancesViaAlchemyPortfolio({
-              walletAddress,
-              chainKeys: evmChainKeys,
-              seedByChain: {
-                ...mongoByChain,
-                [resolvedChainKey]: blockchainBalances,
-              },
-            });
-            await updateBalancesSnapshotInMongoDB(uid, verifiedByChain, 'blockchain');
-          } catch (err) {
-            console.warn('[balances] EVM multi-chain Mongo update failed', err);
-            await updateBalancesSnapshotInMongoDB(uid, { [resolvedChainKey]: blockchainBalances }, 'blockchain');
-          }
-        })();
-      } else if (!shouldSkipAsyncVerification) {
-        void updateBalancesSnapshotInMongoDB(uid, { [resolvedChainKey]: blockchainBalances }, 'blockchain');
+      // Always persist to MongoDB when forceRefresh is true (e.g. page refresh / login context),
+      // because the blockchain was already queried and the fresh values must be saved.
+      // Otherwise only persist when staleness check says verification is needed.
+      const needsVerification = shouldForceRefresh || shouldVerifyBalances(mongoBalances, BALANCE_RULES.staleness.staleTimer);
+      if (needsVerification && !shouldSkipAsyncVerification) {
+        if (useEvmPortfolioPath) {
+          void (async () => {
+            try {
+              const verifiedByChain = await fetchEvmBalancesViaAlchemyPortfolio({
+                walletAddress,
+                chainKeys: evmChainKeys,
+                seedByChain: {
+                  ...mongoByChain,
+                  [resolvedChainKey]: blockchainBalances,
+                },
+              });
+              await updateBalancesSnapshotInMongoDB(uid, verifiedByChain, 'blockchain');
+            } catch (err) {
+              console.warn('[balances] EVM multi-chain Mongo update failed', err);
+              await updateBalancesSnapshotInMongoDB(uid, { [resolvedChainKey]: blockchainBalances }, 'blockchain');
+            }
+          })();
+        } else {
+          void updateBalancesSnapshotInMongoDB(uid, { [resolvedChainKey]: blockchainBalances }, 'blockchain');
+        }
       }
     }
 

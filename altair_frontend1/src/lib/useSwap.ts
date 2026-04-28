@@ -5,6 +5,7 @@ import { ethers } from 'ethers';
 import { withWaitLogger } from './waitLogger';
 import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '@config/blockchain_config';
 import { BASE_MAINNET, BASE_SEPOLIA, ETH_MAINNET, ETH_SEPOLIA, resolveRpcUrls } from '@config/chain_info';
+import { dispatchSwapSubmitted, dispatchBalanceStale } from './eventTypes';
 
 const chainConfigs = {
   BASE_SEPOLIA,
@@ -43,18 +44,26 @@ export const readCachedTokenSnapshot = (params: {
   const normalizedSymbol = symbol.trim().toUpperCase();
   if (!normalizedSymbol) return { raw: null, decimals: null };
 
-  const cacheKey = `cached:balances:${chainKey}:${walletAddress}`;
+  // Normalize to lowercase so the key matches what UserMenu writes using the
+  // Privy-returned address (which is always lowercase, not EIP-55 checksummed).
+  const cacheKey = `cached:balances:${chainKey}:${walletAddress.toLowerCase()}`;
   const raw = localStorage.getItem(cacheKey);
   if (!raw) return { raw: null, decimals: null };
 
   try {
     const payload = JSON.parse(raw) as {
       source?: 'cache' | 'mongo' | 'blockchain' | 'stale';
-      tokens?: Record<string, { symbol?: string; balance?: unknown; decimals?: unknown }>;
+      tokens?: Record<string, { symbol?: string; balance?: unknown; balanceRaw?: unknown; decimals?: unknown }>;
     };
-    if (payload?.source === 'stale') return { raw: null, decimals: null };
+    if (payload?.source === 'stale') {
+      console.log('[readCachedTokenSnapshot] Cache marked as stale for', normalizedSymbol);
+      return { raw: null, decimals: null };
+    }
     const tokens = payload?.tokens;
-    if (!tokens || typeof tokens !== 'object') return { raw: null, decimals: null };
+    if (!tokens || typeof tokens !== 'object') {
+      console.log('[readCachedTokenSnapshot] No tokens found for', normalizedSymbol);
+      return { raw: null, decimals: null };
+    }
 
     const direct = tokens[normalizedSymbol];
     const bySymbol = direct ?? Object.values(tokens).find((entry) => {
@@ -63,19 +72,43 @@ export const readCachedTokenSnapshot = (params: {
       return typeof candidate === 'string' && candidate.trim().toUpperCase() === normalizedSymbol;
     });
 
-    if (!bySymbol || typeof bySymbol !== 'object') return { raw: null, decimals: null };
+    if (!bySymbol || typeof bySymbol !== 'object') {
+      console.log('[readCachedTokenSnapshot] Token not found:', normalizedSymbol);
+      return { raw: null, decimals: null };
+    }
+    
     const decimals = typeof bySymbol.decimals === 'number' ? bySymbol.decimals : null;
-    if (decimals === null || decimals < 0) return { raw: null, decimals: null };
+    if (decimals === null || decimals < 0) {
+      console.log('[readCachedTokenSnapshot] Invalid decimals for', normalizedSymbol, ':', bySymbol.decimals);
+      return { raw: null, decimals: null };
+    }
 
+    // First, try to use balanceRaw if available (raw balance in smallest units)
+    const rawBalance = bySymbol.balanceRaw;
+    if (typeof rawBalance === 'string' && rawBalance.trim().length > 0) {
+      console.log('[readCachedTokenSnapshot] Using balanceRaw for', normalizedSymbol, ':', rawBalance.trim(), 'decimals:', decimals);
+      return { raw: rawBalance.trim(), decimals };
+    }
+
+    // Fall back to human-readable balance and convert to raw
     const human = bySymbol.balance;
+    console.log('[readCachedTokenSnapshot] No balanceRaw, using human balance for', normalizedSymbol, ':', human, 'type:', typeof human, 'decimals:', decimals);
+    
     if (typeof human === 'number' && Number.isFinite(human) && human >= 0) {
-      return { raw: ethers.parseUnits(human.toString(), decimals).toString(), decimals };
+      const raw = ethers.parseUnits(human.toString(), decimals).toString();
+      console.log('[readCachedTokenSnapshot] Converted number to raw:', human, '->', raw);
+      return { raw, decimals };
     }
     if (typeof human === 'string' && human.trim().length > 0) {
-      return { raw: ethers.parseUnits(human.trim(), decimals).toString(), decimals };
+      const raw = ethers.parseUnits(human.trim(), decimals).toString();
+      console.log('[readCachedTokenSnapshot] Converted string to raw:', human.trim(), '->', raw);
+      return { raw, decimals };
     }
+    
+    console.log('[readCachedTokenSnapshot] No valid balance found for', normalizedSymbol);
     return { raw: null, decimals };
-  } catch {
+  } catch (err) {
+    console.error('[readCachedTokenSnapshot] Error reading cache for', normalizedSymbol, ':', err);
     return { raw: null, decimals: null };
   }
 };
@@ -223,7 +256,7 @@ export const useSwap = (explicitChain?: ChainKey) => {
                 buyTokenBeforeRaw: buySnapshot.raw,
                 gasTokenBeforeRaw: gasSnapshot.raw,
                 gasTokenSymbol: gasSymbol,
-                gasTokenDecimals: gasSnapshot.decimals,
+                gasTokenDecimals: gasSnapshot.decimals ?? (gasSymbol === 'SOL' ? 9 : 18),
               },
             }),
           })
@@ -298,6 +331,31 @@ export const useSwap = (explicitChain?: ChainKey) => {
             gasLimit: 1_000_000n,
           })
       );
+
+      // Dispatch swap-submitted event
+      dispatchSwapSubmitted({
+        sellToken: effectiveSell,
+        buyToken: normalizedBuy,
+        sellChain: selectedChain,
+        buyChain: selectedChain, // same chain for single-chain swap
+        amount: sellAmount,
+        txHash: tx.hash,
+        timestamp: Date.now(),
+      });
+
+      // Mark involved tokens as stale due to swap initiation
+      const now = Date.now();
+      const tokensToMarkStale = new Set([effectiveSell, normalizedBuy, gasSymbol]);
+      tokensToMarkStale.forEach((symbol) => {
+        if (symbol) {
+          dispatchBalanceStale({
+            chainKey: selectedChain,
+            symbol,
+            reason: 'swap',
+            timestamp: now,
+          });
+        }
+      });
 
       await withWaitLogger(
         {

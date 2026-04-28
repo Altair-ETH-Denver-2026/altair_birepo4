@@ -6,6 +6,7 @@ import { withWaitLogger } from './waitLogger';
 import { usePrivy } from '@privy-io/react-auth';
 import { useWallets, useSignAndSendTransaction } from '@privy-io/react-auth/solana';
 import { readCachedTokenSnapshot, resolveSelectedChain } from './useSwap';
+import { dispatchSwapSubmitted, dispatchBalanceStale } from './eventTypes';
 import type { ChainKey } from '../../config/blockchain_config';
 import { GAS_TOKENS } from '../../config/blockchain_config';
 
@@ -207,17 +208,45 @@ export function useSolanaSwap(explicitChain?: ChainKey) {
           })
       );
       const txHash = typeof signature === 'string' ? signature : bs58.encode(signature);
+      
+      // Dispatch swap-submitted event
+      const sellTokenUpper = sellToken.toUpperCase();
+      const buyTokenUpper = buyToken.toUpperCase();
+      const gasSymbol = (GAS_TOKENS.SOLANA_MAINNET ?? 'SOL').toUpperCase();
+      dispatchSwapSubmitted({
+        sellToken: sellTokenUpper,
+        buyToken: buyTokenUpper,
+        sellChain: 'SOLANA_MAINNET',
+        buyChain: 'SOLANA_MAINNET',
+        amount: sellAmount,
+        txHash,
+        timestamp: Date.now(),
+      });
+
+      // Mark involved tokens as stale due to swap initiation
+      const now = Date.now();
+      const tokensToMarkStale = new Set([sellTokenUpper, buyTokenUpper, gasSymbol]);
+      tokensToMarkStale.forEach((symbol) => {
+        if (symbol) {
+          dispatchBalanceStale({
+            chainKey: 'SOLANA_MAINNET',
+            symbol,
+            reason: 'swap',
+            timestamp: now,
+          });
+        }
+      });
+
       const sellSnapshot = readCachedTokenSnapshot({
         chainKey: 'SOLANA_MAINNET',
         walletAddress: recipient,
-        symbol: sellToken.toUpperCase(),
+        symbol: sellTokenUpper,
       });
       const buySnapshot = readCachedTokenSnapshot({
         chainKey: 'SOLANA_MAINNET',
         walletAddress: recipient,
-        symbol: buyToken.toUpperCase(),
+        symbol: buyTokenUpper,
       });
-      const gasSymbol = (GAS_TOKENS.SOLANA_MAINNET ?? 'SOL').toUpperCase();
       const gasSnapshot = readCachedTokenSnapshot({
         chainKey: 'SOLANA_MAINNET',
         walletAddress: recipient,

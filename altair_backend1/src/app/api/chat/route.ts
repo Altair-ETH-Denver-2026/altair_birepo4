@@ -279,19 +279,19 @@ function buildUpdatedChatSummary(params: {
 
   const swapEntries = Array.isArray(params.recentSwaps)
     ? params.recentSwaps
-        .filter((entry) => entry && typeof entry === 'object')
-        .map((entry) => {
-          const item = entry as Record<string, unknown>;
-          return {
-            SID: typeof item.SID === 'string' ? item.SID : null,
-            CID: typeof item.CID === 'string' ? item.CID : null,
-            intentString: typeof item.intentString === 'string' ? item.intentString : null,
-            sellToken: typeof item.sellToken === 'object' && item.sellToken !== null ? item.sellToken : null,
-            buyToken: typeof item.buyToken === 'object' && item.buyToken !== null ? item.buyToken : null,
-            txHash: typeof item.txHash === 'string' ? item.txHash : null,
-            timestamp: typeof item.timestamp === 'string' ? item.timestamp : null,
-          };
-        })
+      .filter((entry) => entry && typeof entry === 'object')
+      .map((entry) => {
+        const item = entry as Record<string, unknown>;
+        return {
+          SID: typeof item.SID === 'string' ? item.SID : null,
+          CID: typeof item.CID === 'string' ? item.CID : null,
+          intentString: typeof item.intentString === 'string' ? item.intentString : null,
+          sellToken: typeof item.sellToken === 'object' && item.sellToken !== null ? item.sellToken : null,
+          buyToken: typeof item.buyToken === 'object' && item.buyToken !== null ? item.buyToken : null,
+          txHash: typeof item.txHash === 'string' ? item.txHash : null,
+          timestamp: typeof item.timestamp === 'string' ? item.timestamp : null,
+        };
+      })
     : [];
 
   const nextTurn: ChatSummaryTurn = {
@@ -543,18 +543,18 @@ export async function POST(req: Request) {
                 .lean(),
               shouldUseMongoSummary
                 ? Chat.find({ UID: userFromMongo?.UID })
-                    .select({
-                      CID: 1,
-                      userMessage: 1,
-                      assistantReply: 1,
-                      intentString: 1,
-                      intentExecuted: 1,
-                      timestamp: 1,
-                      createdAt: 1,
-                    })
-                    .sort({ createdAt: -1 })
-                    .limit(chatLimit)
-                    .lean()
+                  .select({
+                    CID: 1,
+                    userMessage: 1,
+                    assistantReply: 1,
+                    intentString: 1,
+                    intentExecuted: 1,
+                    timestamp: 1,
+                    createdAt: 1,
+                  })
+                  .sort({ createdAt: -1 })
+                  .limit(chatLimit)
+                  .lean()
                 : Promise.resolve([]),
             ])
         );
@@ -680,21 +680,21 @@ export async function POST(req: Request) {
     const memoryContextForPrompt = priorMemory ? compactMemoryForPrompt(priorMemory) : null;
     const memoryBlock = memoryContextForPrompt
       ? SYSTEM_PROMPT.contextBlocks.memoryBlock.withData.replace(
-          '${JSON.stringify(memoryContextForPrompt)}',
-          JSON.stringify(memoryContextForPrompt)
-        )
+        '${JSON.stringify(memoryContextForPrompt)}',
+        JSON.stringify(memoryContextForPrompt)
+      )
       : SYSTEM_PROMPT.contextBlocks.memoryBlock.empty;
     const balancesBlock = balanceContextForPrompt
       ? SYSTEM_PROMPT.contextBlocks.balancesBlock.withData.replace(
-          '${JSON.stringify(balanceContextForPrompt)}',
-          JSON.stringify(balanceContextForPrompt)
-        )
+        '${JSON.stringify(balanceContextForPrompt)}',
+        JSON.stringify(balanceContextForPrompt)
+      )
       : SYSTEM_PROMPT.contextBlocks.balancesBlock.empty;
     const swapsBlock = swapHistoryContext
       ? SYSTEM_PROMPT.contextBlocks.swapsBlock.withData.replace(
-          '${JSON.stringify(swapHistoryContext)}',
-          JSON.stringify(swapHistoryContext)
-        )
+        '${JSON.stringify(swapHistoryContext)}',
+        JSON.stringify(swapHistoryContext)
+      )
       : SYSTEM_PROMPT.contextBlocks.swapsBlock.empty;
 
     const selectedChainBlock = typeof selectedChain === 'string' && selectedChain.length > 0
@@ -714,14 +714,14 @@ export async function POST(req: Request) {
     console.log('[chat] model candidates', modelCandidates);
     const normalizedHistory = Array.isArray(history)
       ? history
-          .filter((entry) => entry && typeof entry === 'object')
-          .map((entry) => {
-            const item = entry as { role?: string; content?: string };
-            return {
-              role: item.role ?? 'user',
-              content: item.content ?? '',
-            } as OpenAI.Chat.ChatCompletionMessageParam;
-          })
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => {
+          const item = entry as { role?: string; content?: string };
+          return {
+            role: item.role ?? 'user',
+            content: item.content ?? '',
+          } as OpenAI.Chat.ChatCompletionMessageParam;
+        })
       : [];
 
     const aiResponse: string = await generateChatCompletionWithFallback({

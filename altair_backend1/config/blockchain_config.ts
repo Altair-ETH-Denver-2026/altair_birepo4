@@ -49,9 +49,29 @@ export const FORCE_QUERY_CHAINS = {
     login: true,
     refresh: true,
     openWallet: false,
-    changeChain: false
+    changeChain: false,
+    swapComplete: false,
+    swapStart: false
   }
 };
+
+export const BALANCE_RULES = {
+  staleness: {
+    stalenessCheckConditions:  {
+      login: true,
+      refresh: true,
+      openWallet: true,
+      changeChain: true,
+      swapComplete: true,
+    },
+    staleTimer: 15 * 60000,
+    staleTimerCheckConditions: {
+      openWallet: true,
+      swapStart: true,
+      swapComplete: false,
+    }
+  }
+}
 
 export const DEFAULT_TOKENS = { // These are added when a user creates their account
   ETH_MAINNET: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],

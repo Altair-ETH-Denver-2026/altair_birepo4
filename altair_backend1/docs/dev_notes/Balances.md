@@ -139,6 +139,7 @@ Relay writeback endpoint in [`/api/relay/writeback`](../../src/app/api/relay/wri
 
 - Writes swap record/history (`Swap.create`, chat link, 0G history).
 - Also persists `sellToken` and `buyToken` `balanceAfter` snapshots into `User.balances` via [`updateBalancesInMongoDB()`](../../src/lib/balanceService.ts).
+- **Bug fix (2026-04-14)**: When the buy token is also the gas token (e.g., buying ETH with USDC on Base), the gas update logic now skips updating the gas token balance to avoid overwriting the buy token's `balanceAfter` with gas-only balance. The condition `gasSymbol !== buySymbolNormalized` was added to prevent this conflict.
 
 This closes the earlier gap where swap logs existed but destination-chain user balances could lag.
 

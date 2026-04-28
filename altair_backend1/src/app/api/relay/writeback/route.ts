@@ -103,6 +103,86 @@ const normalizeChainKey = (value: string | null | undefined): ChainKey | null =>
   return key in CHAINS ? (key as ChainKey) : null;
 };
 
+/**
+ * Polls GET /intents/status/v3 until the Relay request reaches a terminal state,
+ * then fetches GET /requests/v2?id=<requestId> to read the actual delivered amount
+ * from outTxs[0].data.value.
+ *
+ * Returns the confirmed raw buy amount string, or null if unavailable / timed-out.
+ */
+const pollRelayForConfirmedBuyAmount = async (requestId: string): Promise<string | null> => {
+  const POLL_INTERVAL_MS = 2_000;
+  const MAX_POLL_MS = 60_000;
+  const TERMINAL_STATUSES = new Set(['success', 'failure', 'refunded']);
+
+  const deadline = Date.now() + MAX_POLL_MS;
+
+  // Poll status until terminal or timeout
+  let finalStatus: string | null = null;
+  while (Date.now() < deadline) {
+    try {
+      const statusRes = await fetch(
+        `https://api.relay.link/intents/status/v3?requestId=${encodeURIComponent(requestId)}`,
+        { headers: { 'Content-Type': 'application/json' } }
+      );
+      if (statusRes.ok) {
+        const statusData = (await statusRes.json()) as { status?: string };
+        const status = statusData?.status ?? '';
+        console.log('[relay/writeback] Relay status poll', { requestId, status });
+        if (TERMINAL_STATUSES.has(status)) {
+          finalStatus = status;
+          break;
+        }
+      }
+    } catch (err) {
+      console.warn('[relay/writeback] Relay status poll error', { requestId, err });
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+
+  if (finalStatus !== 'success') {
+    console.warn('[relay/writeback] Relay did not reach success status within timeout', {
+      requestId,
+      finalStatus,
+    });
+    return null;
+  }
+
+  // Fetch the confirmed delivered amount from GET /requests/v2
+  try {
+    const reqRes = await fetch(
+      `https://api.relay.link/requests/v2?id=${encodeURIComponent(requestId)}`,
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+    if (!reqRes.ok) {
+      console.warn('[relay/writeback] GET /requests/v2 failed', { requestId, status: reqRes.status });
+      return null;
+    }
+    const reqData = (await reqRes.json()) as {
+      requests?: {
+        data?: {
+          outTxs?: Array<{ data?: { value?: string } }>;
+        };
+      };
+    };
+    const value = reqData?.requests?.data?.outTxs?.[0]?.data?.value;
+    if (typeof value === 'string' && value.trim().length > 0) {
+      // Validate it's a parseable integer string
+      try {
+        BigInt(value.trim());
+        console.log('[relay/writeback] Confirmed Relay buy amount from outTxs', { requestId, value });
+        return value.trim();
+      } catch {
+        console.warn('[relay/writeback] outTxs value is not a valid integer', { requestId, value });
+      }
+    }
+  } catch (err) {
+    console.warn('[relay/writeback] GET /requests/v2 fetch error', { requestId, err });
+  }
+
+  return null;
+};
+
 const toBalanceEntryFromRelayToken = (params: {
   token: RelayWritebackToken;
   chainKey: ChainKey;
@@ -239,6 +319,57 @@ export async function POST(req: Request) {
       },
     };
 
+    // --- Confirmed buy amount resolution via Relay GET /requests/v2 ---
+    // Poll Relay's status API until the request reaches a terminal state, then
+    // read the actual delivered amount from outTxs[0].data.value.  This replaces
+    // the pre-execution quote estimate with the blockchain-confirmed value.
+    const requestId = payload.requestId?.trim() ?? null;
+    let confirmedBuyAmountRaw: string | null = null;
+    if (requestId) {
+      confirmedBuyAmountRaw = await withWaitLogger(
+        {
+          file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+          target: 'pollRelayForConfirmedBuyAmount',
+          description: 'poll Relay status + fetch confirmed buy amount',
+        },
+        () => pollRelayForConfirmedBuyAmount(requestId)
+      );
+    }
+
+    // If we got a confirmed amount, override buyToken.amount and recompute
+    // buyToken.balanceAfter using the same gas-correction logic the frontend uses.
+    if (confirmedBuyAmountRaw !== null) {
+      buyToken.amount = confirmedBuyAmountRaw;
+
+      // Recompute balanceAfter: buyBalanceBefore + confirmedBuyAmount - gasFee (if buy = gas token)
+      const buySymbolForGasCheck = buyToken.symbol?.trim().toUpperCase() ?? '';
+      const gasTokenSymbolForCheck = sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
+      const gasIsGasBuy = buySymbolForGasCheck === gasTokenSymbolForCheck && gasTokenSymbolForCheck !== '';
+
+      const buyBalanceBeforeRaw = buyToken.balanceBefore?.trim() ?? '';
+      const gasFeeRaw = parseRawAmount(sellToken.fees?.gas?.amount ?? null) ?? 0n;
+
+      if (buyBalanceBeforeRaw) {
+        try {
+          const before = BigInt(buyBalanceBeforeRaw);
+          const amount = BigInt(confirmedBuyAmountRaw);
+          const gas = gasIsGasBuy ? gasFeeRaw : 0n;
+          const after = before + amount - gas;
+          buyToken.balanceAfter = (after >= 0n ? after : 0n).toString();
+          console.log('[relay/writeback] Recomputed buyToken.balanceAfter from confirmed amount', {
+            requestId,
+            confirmedBuyAmountRaw,
+            buyBalanceBeforeRaw,
+            gasFeeRaw: gasFeeRaw.toString(),
+            gasIsGasBuy,
+            buyBalanceAfter: buyToken.balanceAfter,
+          });
+        } catch (err) {
+          console.warn('[relay/writeback] Failed to recompute buyToken.balanceAfter', { err });
+        }
+      }
+    }
+
     const SID = await generateSwapID();
 
     const swapDoc = {
@@ -286,10 +417,26 @@ export async function POST(req: Request) {
       }
     }
 
+    // Get gas token info early for use in buy token correction
+    const gasSymbol = payload.sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
+    const gasBalanceAfter = payload.sellToken.fees?.gas?.balanceAfter?.trim() ?? '';
+    const gasBalanceBefore = payload.sellToken.fees?.gas?.balanceBefore?.trim() ?? '';
+    const gasAmount = payload.sellToken.fees?.gas?.amount?.trim() ?? '';
+    const gasDecimals = typeof payload.sellToken.fees?.gas?.decimals === 'number'
+      ? payload.sellToken.fees?.gas?.decimals
+      : null;
+    const sellSymbolNormalized = sellToken.symbol?.trim().toUpperCase() ?? '';
+    const buySymbolNormalized = buyToken.symbol?.trim().toUpperCase() ?? '';
+
     const buyChainKey = normalizeChainKey(buyToken.chain);
     const buyBalanceEntry = buyChainKey
       ? toBalanceEntryFromRelayToken({ token: buyToken, chainKey: buyChainKey })
       : null;
+
+    // Persist buy-token balance. When a confirmed buy amount was resolved from
+    // Relay's GET /requests/v2, buyToken.balanceAfter has already been recomputed
+    // above using the confirmed amount + gas-correction. Otherwise it falls back
+    // to the frontend-computed estimate.
     if (buyChainKey && buyBalanceEntry) {
       try {
         await withWaitLogger(
@@ -310,15 +457,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const gasSymbol = payload.sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
-    const gasBalanceAfter = payload.sellToken.fees?.gas?.balanceAfter?.trim() ?? '';
-    const gasBalanceBefore = payload.sellToken.fees?.gas?.balanceBefore?.trim() ?? '';
-    const gasDecimals = typeof payload.sellToken.fees?.gas?.decimals === 'number'
-      ? payload.sellToken.fees?.gas?.decimals
-      : null;
-    const sellSymbolNormalized = sellToken.symbol?.trim().toUpperCase() ?? '';
-
-    if (sellChainKey && gasSymbol && gasBalanceAfter && gasSymbol !== sellSymbolNormalized) {
+    if (sellChainKey && gasSymbol && gasBalanceAfter && gasSymbol !== sellSymbolNormalized && gasSymbol !== buySymbolNormalized) {
       try {
         const gasEntry: BalanceEntry = {
           symbol: gasSymbol,
@@ -388,7 +527,41 @@ export async function POST(req: Request) {
         })
     );
 
-    return NextResponse.json({ ok: true }, { headers: corsHeaders });
+    // Construct balanceUpdates for frontend immediate UI update.
+    // buyToken.balanceAfter has been overridden with the confirmed amount from Relay's
+    // GET /requests/v2 (when available), so buyBalanceEntry reflects the true on-chain value.
+    const balanceUpdates = [];
+
+    if (sellChainKey && sellBalanceEntry) {
+      balanceUpdates.push({
+        chain: sellChainKey,
+        symbol: sellBalanceEntry.symbol,
+        balanceAfterRaw: sellBalanceEntry.entry.balance,
+        decimals: sellBalanceEntry.entry.decimals,
+      });
+    }
+
+    if (buyChainKey && buyBalanceEntry) {
+      balanceUpdates.push({
+        chain: buyChainKey,
+        symbol: buyBalanceEntry.symbol,
+        balanceAfterRaw: buyBalanceEntry.entry.balance,
+        decimals: buyBalanceEntry.entry.decimals,
+      });
+    }
+
+    // Add standalone gas token update when gas token is different from sell and buy tokens.
+    // The frontend computes gasBalanceAfter as gasBalanceBefore - gasFee in this case.
+    if (sellChainKey && gasSymbol && gasBalanceAfter && gasSymbol !== sellSymbolNormalized && gasSymbol !== buySymbolNormalized) {
+      balanceUpdates.push({
+        chain: sellChainKey,
+        symbol: gasSymbol,
+        balanceAfterRaw: gasBalanceAfter,
+        decimals: gasDecimals ?? (sellChainKey === 'SOLANA_MAINNET' || sellChainKey === 'SOLANA_DEVNET' ? 9 : 18),
+      });
+    }
+
+    return NextResponse.json({ ok: true, balanceUpdates }, { headers: corsHeaders });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error';
     return NextResponse.json({ error: message }, { status: 500, headers: corsHeaders });
