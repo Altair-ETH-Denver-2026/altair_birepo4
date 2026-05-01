@@ -27,7 +27,6 @@ import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService
 import {
   resolveFeePct,
   resolveReferralAccount,
-  computeFeeAmount,
   pctToBps,
 } from '@/lib/feeResolver';
 import { Swap } from '@/models/Swap';
@@ -1246,6 +1245,9 @@ export async function POST(req: Request) {
       let sellBalanceAfter: string | null = null;
       let buyBalanceAfter: string | null = null;
       let gasBalanceAfter: string | null = null;
+      // Declared at this scope so both MongoDB and 0G writeback try blocks can access it
+      type ResolvedAltairFee = { token: string; amount: string; decimals: number; bps: number } | null;
+      let resolvedAltairFee: ResolvedAltairFee = null;
       try {
         const user = await withWaitLogger(
           {
@@ -1644,6 +1646,55 @@ export async function POST(req: Request) {
           buyBalanceAfter,
           gasBalanceAfter,
         });
+
+        // --- Extract factual Altair fee from on-chain transaction ---
+        // solanaTx already contains preTokenBalances/postTokenBalances for all accounts.
+        // The referral token account (owned by referralAccount) will show a balance increase
+        // equal to the exact fee amount. This requires zero extra RPC calls.
+        if (isSolana && altairFeeBps !== null && referralAccount !== null) {
+          try {
+            const solanaTx = buyAmountResult.solanaTx ?? null;
+            if (solanaTx?.meta) {
+              const preTokens = solanaTx.meta.preTokenBalances ?? [];
+              const postTokens = solanaTx.meta.postTokenBalances ?? [];
+              // Find the referral account's token balance entry in postTokenBalances
+              const feePostEntry = postTokens.find((b) => b.owner === referralAccount);
+              if (feePostEntry) {
+                const feeMint = feePostEntry.mint;
+                const feePostAmount = BigInt(feePostEntry.uiTokenAmount?.amount ?? '0');
+                // Find the corresponding pre-balance entry (same account index)
+                const feePreEntry = preTokens.find(
+                  (b) => b.owner === referralAccount && b.mint === feeMint
+                );
+                const feePreAmount = BigInt(feePreEntry?.uiTokenAmount?.amount ?? '0');
+                const feeDelta = feePostAmount - feePreAmount;
+                if (feeDelta > 0n) {
+                  // Resolve symbol and decimals from known token config
+                  const sellMint = tokenConfig[normalizedSellToken]?.address ?? null;
+                  const buyMint = tokenConfig[normalizedBuyToken]?.address ?? null;
+                  const feeSymbol =
+                    feeMint === sellMint ? normalizedSellToken
+                    : feeMint === buyMint ? normalizedBuyToken
+                    : feeMint; // fallback: use mint address as symbol
+                  const feeDecimals =
+                    feeMint === sellMint ? (typeof sellDecimals === 'number' ? sellDecimals : 9)
+                    : feeMint === buyMint ? (typeof buyDecimals === 'number' ? buyDecimals : 9)
+                    : (feePostEntry.uiTokenAmount?.decimals ?? 9);
+                  resolvedAltairFee = {
+                    token: feeSymbol,
+                    amount: feeDelta.toString(),
+                    decimals: feeDecimals,
+                    bps: altairFeeBps,
+                  };
+                  console.log('[test-swap] Resolved Altair fee from on-chain tx:', resolvedAltairFee);
+                }
+              }
+            }
+          } catch (feeErr) {
+            console.warn('[test-swap] Failed to extract Altair fee from solanaTx:', feeErr);
+          }
+        }
+
         await withWaitLogger(
           {
             file: 'altair_backend1/src/app/api/test-swap/route.ts',
@@ -1673,13 +1724,8 @@ export async function POST(req: Request) {
               decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
             },
             provider: { token: '', amount: '', decimals: null },
-            altair: altairFeeBps !== null && isSolana
-              ? {
-                  token: normalizedSellToken,
-                  amount: computeFeeAmount(sellAmountRaw, altairFeeBps),
-                  decimals: typeof sellDecimals === 'number' ? sellDecimals : 9,
-                  bps: altairFeeBps,
-                }
+            altair: resolvedAltairFee !== null
+              ? resolvedAltairFee
               : { token: '', amount: '', decimals: null, bps: null },
           },
         };
@@ -1835,13 +1881,8 @@ export async function POST(req: Request) {
                 decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
               },
               provider: { token: '', amount: '', decimals: null },
-              altair: altairFeeBps !== null && isSolana
-                ? {
-                    token: normalizedSellToken,
-                    amount: computeFeeAmount(sellAmountRaw, altairFeeBps),
-                    decimals: typeof sellDecimals === 'number' ? sellDecimals : 9,
-                    bps: altairFeeBps,
-                  }
+              altair: resolvedAltairFee !== null
+                ? resolvedAltairFee
                 : { token: '', amount: '', decimals: null, bps: null },
             },
           };
