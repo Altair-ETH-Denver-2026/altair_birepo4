@@ -24,6 +24,12 @@ import { connectToDatabase } from '@/lib/db';
 import { syncUserFromAccessToken } from '@/lib/users';
 import { withWaitLogger } from '@/lib/waitLogger';
 import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService';
+import {
+  resolveFeePct,
+  resolveReferralAccount,
+  computeFeeAmount,
+  pctToBps,
+} from '@/lib/feeResolver';
 import { Swap } from '@/models/Swap';
 import { Chat } from '@/models/Chat';
 import { generateSwapID } from '@/lib/id';
@@ -1020,6 +1026,17 @@ export async function POST(req: Request) {
       : isSolana
         ? 'Jupiter'
         : '0x';
+
+    // --- Altair fee resolution ---
+    // Resolve fee percentage and referral account from config.
+    // The fee is deducted on-chain by Jupiter via the referral program;
+    // the outAmount returned by Jupiter already reflects the post-fee buy amount.
+    const feePct = resolveFeePct({ action: 'singleChainSwap', platform: 'Jupiter', chainType: 'SVM' });
+    const feeBps = feePct !== null && feePct > 0 ? pctToBps(feePct) : null;
+    const referralAccount = feeBps !== null
+      ? resolveReferralAccount({ platform: 'Jupiter', apiType: 'Ultra' })
+      : null;
+    const altairFeeBps = feeBps;
     const nativeSymbol = isSolana ? 'SOL' : 'ETH';
 
     let resolvedEvmSellToken: ResolvedEvmToken | null = null;
@@ -1656,7 +1673,14 @@ export async function POST(req: Request) {
               decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
             },
             provider: { token: '', amount: '', decimals: null },
-            altair: { token: '', amount: '', decimals: null },
+            altair: altairFeeBps !== null && isSolana
+              ? {
+                  token: normalizedSellToken,
+                  amount: computeFeeAmount(sellAmountRaw, altairFeeBps),
+                  decimals: typeof sellDecimals === 'number' ? sellDecimals : 9,
+                  bps: altairFeeBps,
+                }
+              : { token: '', amount: '', decimals: null, bps: null },
           },
         };
         const buyTokenPayload = {
@@ -1674,7 +1698,7 @@ export async function POST(req: Request) {
           fees: {
             gas: { token: '', amount: '', decimals: null },
             provider: { token: '', amount: '', decimals: null },
-            altair: { token: '', amount: '', decimals: null },
+            altair: { token: '', amount: '', decimals: null, bps: null },
           },
         };
         const SID = await generateSwapID();
@@ -1811,7 +1835,14 @@ export async function POST(req: Request) {
                 decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
               },
               provider: { token: '', amount: '', decimals: null },
-              altair: { token: '', amount: '', decimals: null },
+              altair: altairFeeBps !== null && isSolana
+                ? {
+                    token: normalizedSellToken,
+                    amount: computeFeeAmount(sellAmountRaw, altairFeeBps),
+                    decimals: typeof sellDecimals === 'number' ? sellDecimals : 9,
+                    bps: altairFeeBps,
+                  }
+                : { token: '', amount: '', decimals: null, bps: null },
             },
           };
           const buyTokenPayload = {
@@ -1829,7 +1860,7 @@ export async function POST(req: Request) {
             fees: {
               gas: { token: '', amount: '', decimals: null },
               provider: { token: '', amount: '', decimals: null },
-              altair: { token: '', amount: '', decimals: null },
+              altair: { token: '', amount: '', decimals: null, bps: null },
             },
           };
           await withWaitLogger(
@@ -2036,6 +2067,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Invalid amount' }, { status: 400 });
       }
       const amountInRaw = Math.floor(amountHuman * 10 ** decimals).toString();
+
       const jupiterApiKey = process.env.JUPITER_API_KEY;
       if (!jupiterApiKey) {
         return NextResponse.json(
@@ -2043,7 +2075,11 @@ export async function POST(req: Request) {
           { status: 500 }
         );
       }
-      const orderUrl = `https://api.jup.ag/ultra/v1/order?inputMint=${encodeURIComponent(tokenInMint)}&outputMint=${encodeURIComponent(tokenOutMint)}&amount=${amountInRaw}&taker=${encodeURIComponent(recipient)}`;
+      let orderUrl = `https://api.jup.ag/ultra/v1/order?inputMint=${encodeURIComponent(tokenInMint)}&outputMint=${encodeURIComponent(tokenOutMint)}&amount=${amountInRaw}&taker=${encodeURIComponent(recipient)}`;
+      if (referralAccount && feeBps !== null) {
+        orderUrl += `&referralAccount=${encodeURIComponent(referralAccount)}&referralFee=${feeBps}`;
+        console.log('[test-swap] Jupiter Ultra with referral:', { referralAccount, feeBps });
+      }
       const jupiterCacheKey = buildQuoteCacheKey([
         'jupiter',
         'SOLANA_MAINNET',

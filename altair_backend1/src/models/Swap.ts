@@ -14,9 +14,9 @@ const TokenSchema = new Schema(
     fees: {
       type: Schema.Types.Mixed,
       default: {
-        gas: { token: '', amount: '', decimals: null },
-        provider: { token: '', amount: '', decimals: null },
-        altair: { token: '', amount: '', decimals: null },
+        gas: { token: '', amount: '', decimals: null, bps: null },
+        provider: { token: '', amount: '', decimals: null, bps: null },
+        altair: { token: '', amount: '', decimals: null, bps: null },
       },
     },
   },
