@@ -27,6 +27,7 @@ import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService
 import {
   resolveFeePct,
   resolveReferralAccount,
+  resolveFeeRecipient,
   pctToBps,
 } from '@/lib/feeResolver';
 import { Swap } from '@/models/Swap';
@@ -1036,6 +1037,12 @@ export async function POST(req: Request) {
       ? resolveReferralAccount({ platform: 'Jupiter', apiType: 'Ultra' })
       : null;
     const altairFeeBps = feeBps;
+    // EVM fee resolution — populated before the 0x quote is fetched, used in writeback
+    let evmAltairFeePct: number | null = null;
+    let evmFeeRecipient: string | null = null;
+    // Declared at POST function scope so both writeback and quote paths can access it
+    type ResolvedProviderFee = { token: string; amount: string; decimals: number | null } | null;
+    let resolvedProviderFee: ResolvedProviderFee = null;
     const nativeSymbol = isSolana ? 'SOL' : 'ETH';
 
     let resolvedEvmSellToken: ResolvedEvmToken | null = null;
@@ -1245,7 +1252,7 @@ export async function POST(req: Request) {
       let sellBalanceAfter: string | null = null;
       let buyBalanceAfter: string | null = null;
       let gasBalanceAfter: string | null = null;
-      // Declared at this scope so both MongoDB and 0G writeback try blocks can access it
+      // Declared at this scope so both MongoDB and 0G writeback try blocks can access them
       type ResolvedAltairFee = { token: string; amount: string; decimals: number; bps: number } | null;
       let resolvedAltairFee: ResolvedAltairFee = null;
       try {
@@ -1695,6 +1702,80 @@ export async function POST(req: Request) {
           }
         }
 
+        // --- Extract Altair fee from EVM transaction receipt ---
+        // 0x deducts the fee from the swap output and transfers it to the feeRecipient
+        // address via an ERC-20 Transfer event. We parse the tx receipt logs to find
+        // Transfer events where the `to` address matches the feeRecipient.
+        // The fee config is resolved here (not from the outer scope) because the writeback
+        // section runs before the EVM fee resolution block in the quote path.
+        if (!isSolana) {
+          try {
+            const writebackFeePct = resolveFeePct({ action: 'singleChainSwap', platform: '0x', chainType: 'EVM' });
+            const writebackFeeRecipient = resolveFeeRecipient(resolvedChainKey);
+            if (writebackFeePct !== null && writebackFeePct > 0 && writebackFeeRecipient !== null) {
+              const evmReceipt = buyAmountResult.evmReceipt ?? null;
+              if (evmReceipt && Array.isArray(evmReceipt.logs) && evmReceipt.logs.length > 0) {
+                const feeRecipientLower = writebackFeeRecipient.toLowerCase();
+                const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+                // Build a map of known token addresses -> { symbol, decimals }
+                const knownTokens: Record<string, { symbol: string; decimals: number }> = {};
+                const sellAddr = normalizedSellToken === 'ETH'
+                  ? null
+                  : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? null);
+                const buyAddr = normalizedBuyToken === 'ETH'
+                  ? null
+                  : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? null);
+                if (sellAddr) {
+                  knownTokens[sellAddr.toLowerCase()] = {
+                    symbol: normalizedSellToken,
+                    decimals: typeof sellDecimals === 'number' ? sellDecimals : 18,
+                  };
+                }
+                if (buyAddr) {
+                  knownTokens[buyAddr.toLowerCase()] = {
+                    symbol: normalizedBuyToken,
+                    decimals: typeof buyDecimals === 'number' ? buyDecimals : 18,
+                  };
+                }
+                // Iterate logs to find Transfer events to feeRecipient
+                for (const log of evmReceipt.logs) {
+                  if (typeof log !== 'object' || log === null) continue;
+                  const logData = log as { topics?: string[]; data?: string; address?: string };
+                  if (!Array.isArray(logData.topics) || logData.topics.length < 3) continue;
+                  if (logData.topics[0] !== transferTopic) continue;
+                  // topic[2] is the indexed `to` address (left-padded to 32 bytes)
+                  const toAddress = '0x' + logData.topics[2].slice(26).toLowerCase();
+                  if (toAddress !== feeRecipientLower) continue;
+                  // Extract the transfer amount from log data (uint256)
+                  const amountHex = logData.data ?? '0x0';
+                  const feeAmount = BigInt(amountHex);
+                  if (feeAmount <= 0n) continue;
+                  // Resolve token symbol/decimals from the log's contract address
+                  const logContract = (logData.address ?? '').toLowerCase();
+                  const known = knownTokens[logContract];
+                  const feeSymbol = known?.symbol ?? logContract;
+                  const feeDecimals = known?.decimals ?? 18;
+                  resolvedAltairFee = {
+                    token: feeSymbol,
+                    amount: feeAmount.toString(),
+                    decimals: feeDecimals,
+                    bps: pctToBps(writebackFeePct),
+                  };
+                  console.log('[test-swap] Extracted EVM Altair fee from tx receipt:', resolvedAltairFee);
+                  break; // Use the first matching Transfer event
+                }
+                if (resolvedAltairFee === null) {
+                  console.warn('[test-swap] No Transfer event to feeRecipient found in tx receipt logs');
+                }
+              } else {
+                console.warn('[test-swap] No EVM receipt available for fee extraction');
+              }
+            }
+          } catch (feeErr) {
+            console.warn('[test-swap] Failed to extract EVM Altair fee from tx receipt:', feeErr);
+          }
+        }
+
         await withWaitLogger(
           {
             file: 'altair_backend1/src/app/api/test-swap/route.ts',
@@ -1723,7 +1804,9 @@ export async function POST(req: Request) {
               amount: gasFee?.amount ?? '',
               decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
             },
-            provider: { token: '', amount: '', decimals: null },
+            provider: resolvedProviderFee !== null
+              ? resolvedProviderFee
+              : { token: '', amount: '', decimals: null },
             altair: resolvedAltairFee !== null
               ? resolvedAltairFee
               : { token: '', amount: '', decimals: null, bps: null },
@@ -1880,7 +1963,9 @@ export async function POST(req: Request) {
                 amount: gasFee?.amount ?? '',
                 decimals: gasFee?.token === 'SOL' ? 9 : gasFee?.token === 'ETH' ? 18 : null,
               },
-              provider: { token: '', amount: '', decimals: null },
+              provider: resolvedProviderFee !== null
+                ? resolvedProviderFee
+                : { token: '', amount: '', decimals: null },
               altair: resolvedAltairFee !== null
                 ? resolvedAltairFee
                 : { token: '', amount: '', decimals: null, bps: null },
@@ -2201,6 +2286,16 @@ export async function POST(req: Request) {
     }
     const sellAmountRaw = ethers.parseUnits(amountHuman.toString(), sellDecimals).toString();
 
+    // Resolve Altair fee for EVM single-chain swaps via 0x
+    {
+      const feePct = resolveFeePct({ action: 'singleChainSwap', platform: '0x', chainType: 'EVM' });
+      if (feePct !== null && feePct > 0) {
+        evmAltairFeePct = feePct;
+        evmFeeRecipient = resolveFeeRecipient(resolvedChainKey);
+        console.log('[test-swap] EVM Altair fee resolved:', { evmAltairFeePct, evmFeeRecipient });
+      }
+    }
+
     const zeroXApiKey = process.env.ZEROX_API_KEY;
     const zeroXSellToken = normalizedSellToken === 'ETH' ? 'ETH' : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? '');
     const zeroXBuyToken = normalizedBuyToken === 'ETH' ? 'ETH' : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? '');
@@ -2233,6 +2328,10 @@ export async function POST(req: Request) {
       v1Url.searchParams.set('sellAmount', sellAmountRaw);
       v1Url.searchParams.set('takerAddress', recipient);
       v1Url.searchParams.set('slippagePercentage', '0.005');
+      if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
+        v1Url.searchParams.set('buyTokenPercentageFee', String(evmAltairFeePct));
+        v1Url.searchParams.set('feeRecipient', evmFeeRecipient);
+      }
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (zeroXApiKey) headers['0x-api-key'] = zeroXApiKey;
 
@@ -2314,6 +2413,16 @@ export async function POST(req: Request) {
       v2Url.searchParams.set('sellAmount', sellAmountRaw);
       v2Url.searchParams.set('taker', recipient);
       v2Url.searchParams.set('slippageBps', '50');
+      if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
+        // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
+        // swapFeeBps is in basis points (0.5% = 50 bps).
+        // swapFeeToken must be either the buyToken or sellToken address.
+        // We use the buy token since 0x deducts fees from the output.
+        const evmAltairFeeBps = pctToBps(evmAltairFeePct);
+        v2Url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
+        v2Url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
+        v2Url.searchParams.set('swapFeeToken', zeroXV2BuyToken);
+      }
 
       const v2CacheKey = buildQuoteCacheKey([
         '0x',
@@ -2383,6 +2492,18 @@ export async function POST(req: Request) {
             (await v2Res.json()) as {
               liquidityAvailable?: boolean;
               transaction?: { to: string; data: string; value: string; gas?: string };
+              fees?: {
+                integratorFee?: {
+                  amount: string;
+                  token: string;
+                  type: string;
+                };
+                zeroExFee?: {
+                  amount: string;
+                  token: string;
+                  type: string;
+                };
+              };
             }
         );
         if (v2Payload.liquidityAvailable === false || !v2Payload.transaction) {
@@ -2397,6 +2518,15 @@ export async function POST(req: Request) {
         }
         methodParameters = { to: tx.to, calldata: tx.data, value: tx.value };
         setQuoteCache(v2CacheKey, methodParameters);
+        // Extract the 0x protocol fee (zeroExFee) from the v2 response for provider fee tracking
+        if (v2Payload.fees?.zeroExFee?.amount && v2Payload.fees?.zeroExFee?.token) {
+          resolvedProviderFee = {
+            token: v2Payload.fees.zeroExFee.token,
+            amount: v2Payload.fees.zeroExFee.amount,
+            decimals: null, // 0x returns fee amount in the token's raw units; decimals are not provided in the fee object
+          };
+          console.log('[test-swap] Extracted 0x protocol fee from v2 response:', resolvedProviderFee);
+        }
       }
     }
 

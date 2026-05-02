@@ -14,6 +14,7 @@ import {
   SVM_FEES,
   BRIDGING_FEES,
   REFERRAL_ACCOUNTS,
+  FEE_RECIPIENT_ADDRESSES,
 } from '../../config/fees_config';
 
 type Action =
@@ -145,6 +146,15 @@ export function resolveReferralAccount(
   }
 
   return null;
+}
+
+/**
+ * Resolve the fee recipient address for a given chain key.
+ * Used by 0x's buyTokenPercentageFee mechanism.
+ */
+export function resolveFeeRecipient(chainKey: string): string | null {
+  const entry = (FEE_RECIPIENT_ADDRESSES as Record<string, string>)[chainKey];
+  return entry ?? null;
 }
 
 /**
