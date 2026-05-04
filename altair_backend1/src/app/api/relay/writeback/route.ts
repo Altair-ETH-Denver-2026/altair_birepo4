@@ -10,6 +10,7 @@ import { syncUserFromAccessToken } from '@/lib/users';
 import { buildCorsHeaders } from '@/lib/appUrls';
 import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService';
 import { CHAINS, type ChainKey } from '../../../../../config/blockchain_config';
+import { computeFeeAmount } from '@/lib/feeResolver';
 
 const corsHeaders = buildCorsHeaders(null);
 
@@ -32,7 +33,7 @@ type RelayWritebackToken = {
       balanceAfter?: string | null;
     } | null;
     provider?: { token?: string | null; amount?: string | null; decimals?: number | null } | null;
-    altair?: { token?: string | null; amount?: string | null; decimals?: number | null } | null;
+    altair?: { token?: string | null; amount?: string | null; decimals?: number | null; bps?: number | null } | null;
   } | null;
 };
 
@@ -213,6 +214,7 @@ const toBalanceEntryFromRelayToken = (params: {
 
 export async function POST(req: Request) {
   try {
+    console.log('[relay/writeback] Received writeback request');
     const corsHeaders = buildCorsHeaders(req.headers.get('origin'));
     const payload = (await req.json()) as {
       cid?: string | null;
@@ -221,7 +223,20 @@ export async function POST(req: Request) {
       buyToken?: RelayWritebackToken | null;
       txHash?: string | null;
       requestId?: string | null;
+      _altairFee?: {
+        token: string;
+        amount: string | null;
+        decimals: number | null;
+        bps: number;
+      } | null;
     };
+
+    console.log('[relay/writeback] Payload received', {
+      hasSellToken: !!payload?.sellToken,
+      hasBuyToken: !!payload?.buyToken,
+      hasRequestId: !!payload?.requestId,
+      intentString: payload?.intentString,
+    });
 
     const authHeader = req.headers.get('authorization');
     const accessTokenHeader = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -229,10 +244,12 @@ export async function POST(req: Request) {
     const cookieToken = cookieStore.get('privy-token')?.value ?? null;
     const accessToken = accessTokenHeader ?? cookieToken;
     if (!accessToken) {
+      console.error('[relay/writeback] Missing access token');
       return NextResponse.json({ error: 'Missing Privy access token for relay writeback.' }, { status: 401, headers: corsHeaders });
     }
 
     if (!payload?.sellToken || !payload?.buyToken) {
+      console.error('[relay/writeback] Missing sellToken or buyToken');
       return NextResponse.json({ error: 'Missing sellToken or buyToken payload.' }, { status: 400, headers: corsHeaders });
     }
 
@@ -260,6 +277,11 @@ export async function POST(req: Request) {
       buyToken: payload.buyToken,
     });
 
+    // --- Altair fee computation (EARLY) ---
+    // Declare this early so it can be used in sellToken/buyToken construction
+    // Will be populated after confirmed buy amount is resolved
+    let resolvedAltairFee: { token: string; amount: string; decimals: number | null; bps: number } | null = null;
+
     const sellToken = {
       amount: payload.sellToken.amount ?? '',
       decimals: typeof payload.sellToken.decimals === 'number' ? payload.sellToken.decimals : null,
@@ -284,9 +306,10 @@ export async function POST(req: Request) {
             (typeof payload.sellToken.fees?.provider?.decimals === 'number' ? payload.sellToken.fees.provider.decimals : null),
         },
         altair: {
-          token: payload.sellToken.fees?.altair?.token ?? '',
-          amount: payload.sellToken.fees?.altair?.amount ?? '',
-          decimals: typeof payload.sellToken.fees?.altair?.decimals === 'number' ? payload.sellToken.fees.altair.decimals : null,
+          token: resolvedAltairFee?.token ?? payload.sellToken.fees?.altair?.token ?? '',
+          amount: resolvedAltairFee?.amount ?? payload.sellToken.fees?.altair?.amount ?? '',
+          decimals: resolvedAltairFee?.decimals ?? (typeof payload.sellToken.fees?.altair?.decimals === 'number' ? payload.sellToken.fees.altair.decimals : null),
+          bps: resolvedAltairFee?.bps ?? payload.sellToken.fees?.altair?.bps ?? null,
         },
       },
     };
@@ -312,9 +335,10 @@ export async function POST(req: Request) {
           decimals: typeof payload.buyToken.fees?.provider?.decimals === 'number' ? payload.buyToken.fees.provider.decimals : null,
         },
         altair: {
-          token: payload.buyToken.fees?.altair?.token ?? '',
-          amount: payload.buyToken.fees?.altair?.amount ?? '',
-          decimals: typeof payload.buyToken.fees?.altair?.decimals === 'number' ? payload.buyToken.fees.altair.decimals : null,
+          token: resolvedAltairFee?.token ?? payload.buyToken.fees?.altair?.token ?? '',
+          amount: resolvedAltairFee?.amount ?? payload.buyToken.fees?.altair?.amount ?? '',
+          decimals: resolvedAltairFee?.decimals ?? (typeof payload.buyToken.fees?.altair?.decimals === 'number' ? payload.buyToken.fees.altair.decimals : null),
+          bps: resolvedAltairFee?.bps ?? payload.buyToken.fees?.altair?.bps ?? null,
         },
       },
     };
@@ -370,6 +394,28 @@ export async function POST(req: Request) {
       }
     }
 
+    // --- Altair fee computation (POPULATE) ---
+    // The fee is deducted from the buy token (output) by Relay.
+    // Compute it from the (possibly confirmed) buy amount.
+    if (payload._altairFee && payload._altairFee.bps > 0) {
+      const buyAmountForFee = confirmedBuyAmountRaw ?? buyToken.amount;
+      const feeAmount = computeFeeAmount(buyAmountForFee, payload._altairFee.bps);
+      if (feeAmount !== '0') {
+        resolvedAltairFee = {
+          token: payload._altairFee.token || buyToken.symbol || '',
+          amount: feeAmount,
+          decimals: payload._altairFee.decimals ?? buyToken.decimals,
+          bps: payload._altairFee.bps,
+        };
+        console.log('[relay/writeback] Computed Altair fee', {
+          buyAmountForFee,
+          feeBps: payload._altairFee.bps,
+          feeAmount,
+          resolvedAltairFee,
+        });
+      }
+    }
+
     const SID = await generateSwapID();
 
     const swapDoc = {
@@ -394,6 +440,30 @@ export async function POST(req: Request) {
     );
 
     const sellChainKey = normalizeChainKey(sellToken.chain);
+    
+    // If sellToken.balanceAfter is null, try to compute it from balanceBefore - amount - gas
+    if (sellChainKey && !sellToken.balanceAfter && sellToken.balanceBefore && sellToken.amount) {
+      try {
+        const before = BigInt(sellToken.balanceBefore);
+        const amount = BigInt(sellToken.amount);
+        const gasRaw = parseRawAmount(sellToken.fees?.gas?.amount ?? null) ?? 0n;
+        const sellSymbol = sellToken.symbol?.trim().toUpperCase() ?? '';
+        const gasSymbol = sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
+        const gasIsGasSell = sellSymbol === gasSymbol && gasSymbol !== '';
+        const gas = gasIsGasSell ? gasRaw : 0n;
+        const after = before - amount - gas;
+        sellToken.balanceAfter = (after >= 0n ? after : 0n).toString();
+        console.log('[relay/writeback] Computed sellToken.balanceAfter', {
+          before: sellToken.balanceBefore,
+          amount: sellToken.amount,
+          gas: gas.toString(),
+          after: sellToken.balanceAfter,
+        });
+      } catch (err) {
+        console.warn('[relay/writeback] Failed to compute sellToken.balanceAfter', { err });
+      }
+    }
+    
     const sellBalanceEntry = sellChainKey
       ? toBalanceEntryFromRelayToken({ token: sellToken, chainKey: sellChainKey })
       : null;
@@ -561,9 +631,11 @@ export async function POST(req: Request) {
       });
     }
 
+    console.log('[relay/writeback] Success, returning balanceUpdates', { count: balanceUpdates.length });
     return NextResponse.json({ ok: true, balanceUpdates }, { headers: corsHeaders });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error';
+    console.error('[relay/writeback] Error', { message, error });
     return NextResponse.json({ error: message }, { status: 500, headers: corsHeaders });
   }
 }

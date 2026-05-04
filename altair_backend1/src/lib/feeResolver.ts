@@ -15,6 +15,7 @@ import {
   BRIDGING_FEES,
   REFERRAL_ACCOUNTS,
   FEE_RECIPIENT_ADDRESSES,
+  RELAY_FEE_RECIPIENT,
 } from '../../config/fees_config';
 
 type Action =
@@ -155,6 +156,15 @@ export function resolveReferralAccount(
 export function resolveFeeRecipient(chainKey: string): string | null {
   const entry = (FEE_RECIPIENT_ADDRESSES as Record<string, string>)[chainKey];
   return entry ?? null;
+}
+
+/**
+ * Resolve the Relay fee recipient wallet address.
+ * Relay uses a single wallet address for fee accumulation across all chains.
+ * Fees are claimed via POST /app-fees/{wallet}/claim.
+ */
+export function resolveRelayFeeRecipient(): string | null {
+  return RELAY_FEE_RECIPIENT ?? null;
 }
 
 /**

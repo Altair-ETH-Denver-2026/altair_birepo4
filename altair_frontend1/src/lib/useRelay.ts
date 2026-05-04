@@ -572,6 +572,7 @@ export const useRelay = () => {
     let relayQuote: RelayQuoteResponse | null = null;
     let quoteReceivedAtMs = 0;
     let totalRelayGasPaidRaw = 0n;
+    let altairFeeMeta: { token: string; amount: string | null; decimals: number | null; bps: number } | null = null;
 
     for (let quoteAttempt = 1; quoteAttempt <= maxQuoteAttempts; quoteAttempt += 1) {
       relayQuote = await withWaitLogger(
@@ -595,6 +596,9 @@ export const useRelay = () => {
         }
       );
       quoteReceivedAtMs = Date.now();
+
+      // Extract _altairFee metadata from the quote response
+      altairFeeMeta = relayQuote?._altairFee ?? null;
 
       requestId = null;
       for (const step of relayQuote.steps) {
@@ -1188,6 +1192,7 @@ export const useRelay = () => {
     const relayWritebackPayload = {
       cid: cid ?? null,
       intentString: intent.type,
+      _altairFee: altairFeeMeta,
       sellToken: {
         amount: amountBase,
         decimals: originToken.decimals,
@@ -1239,18 +1244,29 @@ export const useRelay = () => {
     }> = [];
     try {
       const backendBaseUrl = getBackendBaseUrl();
+      console.log('[Relay] Sending writeback request', {
+        url: `${backendBaseUrl}/api/relay/writeback`,
+        payload: relayWritebackPayload,
+      });
       const writebackRes = await fetch(`${backendBaseUrl}/api/relay/writeback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(relayWritebackPayload),
       });
+      console.log('[Relay] Writeback response status', writebackRes.status);
+      if (!writebackRes.ok) {
+        const errorText = await writebackRes.text();
+        console.error('[Relay] Writeback failed with status', writebackRes.status, errorText);
+        throw new Error(`Writeback failed: ${errorText}`);
+      }
       const writebackData = await writebackRes.json().catch(() => ({})) as { balanceUpdates?: typeof writebackBalanceUpdates };
+      console.log('[Relay] Writeback response data', writebackData);
       if (Array.isArray(writebackData?.balanceUpdates)) {
         writebackBalanceUpdates = writebackData.balanceUpdates;
       }
     } catch (err) {
-      console.warn('[Relay] writeback failed', err);
+      console.error('[Relay] writeback failed', err);
     }
 
     if (typeof window !== 'undefined') {

@@ -12,8 +12,14 @@ export const FEE_RECIPIENT_ADDRESSES = {
     BASE_SEPOLIA: '0xfA7b97Bc73521B5A9cfFF6F4863f91bf84810935',
     BASE_MAINNET: '0xfA7b97Bc73521B5A9cfFF6F4863f91bf84810935',
     SOLANA_MAINNET: 'AfxJVaUqjyy8qwf6BKEmwAXCQ4WWJssAmzWPgNtRuRv9',
-    SOLANA_DEVNET: 'AfxJVaUqjyy8qwf6BKEmwAXCQ4WWJssAmzWPgNtRuRv9'
+    SOLANA_DEVNET: 'AfxJVaUqjyy8qwf6BKEmwAXCQ4WWJssAmzWPgNtRuRv9',
+    CROSS_CHAIN_SWAP: '0xfA7b97Bc73521B5A9cfFF6F4863f91bf84810935',
+    BRIDGE: '0xfA7b97Bc73521B5A9cfFF6F4863f91bf84810935'
 };
+
+// Relay uses a single wallet address for fee accumulation across all chains.
+// This wallet will claim fees via Relay's /app-fees/{wallet}/claim API.
+export const RELAY_FEE_RECIPIENT = '0xfA7b97Bc73521B5A9cfFF6F4863f91bf84810935';
 
 export const REFERRAL_ACCOUNTS = {
     Jupiter: {
