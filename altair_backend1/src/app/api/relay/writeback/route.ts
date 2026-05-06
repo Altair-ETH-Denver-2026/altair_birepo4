@@ -441,6 +441,15 @@ export async function POST(req: Request) {
 
     const sellChainKey = normalizeChainKey(sellToken.chain);
     
+    console.log('[relay/writeback] sellToken state before computation', {
+      chain: sellToken.chain,
+      symbol: sellToken.symbol,
+      amount: sellToken.amount,
+      balanceBefore: sellToken.balanceBefore,
+      balanceAfter: sellToken.balanceAfter,
+      hasGasFee: !!sellToken.fees?.gas?.amount,
+    });
+    
     // If sellToken.balanceAfter is null, try to compute it from balanceBefore - amount - gas
     if (sellChainKey && !sellToken.balanceAfter && sellToken.balanceBefore && sellToken.amount) {
       try {
