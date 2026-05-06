@@ -16,6 +16,19 @@ import { buildCorsHeaders } from '@/lib/appUrls';
 
 const corsHeaders = buildCorsHeaders(null);
 
+type ChatApiResponse = {
+  content: string;
+  zgHash: string | null;
+  txHash: string | null;
+  zgError: string | null;
+  cid: string | null;
+  solAddress: string | null;
+};
+
+const CHAT_DEDUPE_TTL_MS = 2 * 60 * 1000;
+const chatInFlightByKey = new Map<string, Promise<ChatApiResponse>>();
+const chatCompletedByKey = new Map<string, { expiresAt: number; payload: ChatApiResponse }>();
+
 type LlmProvider = typeof LLM_MODELS.options[keyof typeof LLM_MODELS.options];
 
 const resolveProviderForModel = (model: string): LlmProvider => {
@@ -266,19 +279,19 @@ function buildUpdatedChatSummary(params: {
 
   const swapEntries = Array.isArray(params.recentSwaps)
     ? params.recentSwaps
-        .filter((entry) => entry && typeof entry === 'object')
-        .map((entry) => {
-          const item = entry as Record<string, unknown>;
-          return {
-            SID: typeof item.SID === 'string' ? item.SID : null,
-            CID: typeof item.CID === 'string' ? item.CID : null,
-            intentString: typeof item.intentString === 'string' ? item.intentString : null,
-            sellToken: typeof item.sellToken === 'object' && item.sellToken !== null ? item.sellToken : null,
-            buyToken: typeof item.buyToken === 'object' && item.buyToken !== null ? item.buyToken : null,
-            txHash: typeof item.txHash === 'string' ? item.txHash : null,
-            timestamp: typeof item.timestamp === 'string' ? item.timestamp : null,
-          };
-        })
+      .filter((entry) => entry && typeof entry === 'object')
+      .map((entry) => {
+        const item = entry as Record<string, unknown>;
+        return {
+          SID: typeof item.SID === 'string' ? item.SID : null,
+          CID: typeof item.CID === 'string' ? item.CID : null,
+          intentString: typeof item.intentString === 'string' ? item.intentString : null,
+          sellToken: typeof item.sellToken === 'object' && item.sellToken !== null ? item.sellToken : null,
+          buyToken: typeof item.buyToken === 'object' && item.buyToken !== null ? item.buyToken : null,
+          txHash: typeof item.txHash === 'string' ? item.txHash : null,
+          timestamp: typeof item.timestamp === 'string' ? item.timestamp : null,
+        };
+      })
     : [];
 
   const nextTurn: ChatSummaryTurn = {
@@ -409,16 +422,50 @@ function buildChatSummaryPayload(params: {
 }
 
 export async function POST(req: Request) {
+  let dedupeKey: string | null = null;
+  let resolveInFlight: ((payload: ChatApiResponse) => void) | undefined;
+  let rejectInFlight: ((reason?: unknown) => void) | undefined;
   try {
-  const t0 = Date.now();
-    console.log('[chat] request start', { at: new Date(t0).toISOString() });
-    const { message, history, accessToken, selectedChain, solanaAddress } = await req.json();
+    const t0 = Date.now();
+    const requestId = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    console.log('[chat] request start', { requestId, at: new Date(t0).toISOString() });
+    const { message, history, accessToken, selectedChain, solanaAddress, clientRequestId } = await req.json();
     const cookieStore = await cookies();
     const cookieToken = cookieStore.get('privy-token')?.value ?? null;
     const resolvedAccessToken =
       typeof accessToken === 'string' && accessToken.length > 0
         ? accessToken
         : (cookieToken ?? null);
+    const normalizedClientRequestId =
+      typeof clientRequestId === 'string' && clientRequestId.trim().length > 0
+        ? clientRequestId.trim()
+        : null;
+
+    if (resolvedAccessToken && normalizedClientRequestId) {
+      dedupeKey = `${resolvedAccessToken}:${normalizedClientRequestId}`;
+      const now = Date.now();
+      const cached = chatCompletedByKey.get(dedupeKey);
+      if (cached && cached.expiresAt > now) {
+        console.log('[chat] dedupe hit (completed)', { requestId, clientRequestId: normalizedClientRequestId });
+        return NextResponse.json(cached.payload, { headers: corsHeaders });
+      }
+      if (cached && cached.expiresAt <= now) {
+        chatCompletedByKey.delete(dedupeKey);
+      }
+
+      const existingInFlight = chatInFlightByKey.get(dedupeKey);
+      if (existingInFlight) {
+        console.log('[chat] dedupe hit (in-flight)', { requestId, clientRequestId: normalizedClientRequestId });
+        const payload = await existingInFlight;
+        return NextResponse.json(payload, { headers: corsHeaders });
+      }
+
+      const inFlightPromise = new Promise<ChatApiResponse>((resolve, reject) => {
+        resolveInFlight = resolve;
+        rejectInFlight = reject;
+      });
+      chatInFlightByKey.set(dedupeKey, inFlightPromise);
+    }
 
     let zgHash: string | null = null;
     let zgError: string | null = null;
@@ -456,7 +503,7 @@ export async function POST(req: Request) {
           {
             file: 'altair_backend1/src/app/api/chat/route.ts',
             target: 'syncUserFromAccessToken',
-            description: 'Privy + Mongo user sync',
+            description: `Privy + Mongo user sync [${requestId}]`,
           },
           () => syncUserFromAccessToken(resolvedAccessToken, { mode: 'runtime' })
         );
@@ -496,18 +543,18 @@ export async function POST(req: Request) {
                 .lean(),
               shouldUseMongoSummary
                 ? Chat.find({ UID: userFromMongo?.UID })
-                    .select({
-                      CID: 1,
-                      userMessage: 1,
-                      assistantReply: 1,
-                      intentString: 1,
-                      intentExecuted: 1,
-                      timestamp: 1,
-                      createdAt: 1,
-                    })
-                    .sort({ createdAt: -1 })
-                    .limit(chatLimit)
-                    .lean()
+                  .select({
+                    CID: 1,
+                    userMessage: 1,
+                    assistantReply: 1,
+                    intentString: 1,
+                    intentExecuted: 1,
+                    timestamp: 1,
+                    createdAt: 1,
+                  })
+                  .sort({ createdAt: -1 })
+                  .limit(chatLimit)
+                  .lean()
                 : Promise.resolve([]),
             ])
         );
@@ -633,21 +680,21 @@ export async function POST(req: Request) {
     const memoryContextForPrompt = priorMemory ? compactMemoryForPrompt(priorMemory) : null;
     const memoryBlock = memoryContextForPrompt
       ? SYSTEM_PROMPT.contextBlocks.memoryBlock.withData.replace(
-          '${JSON.stringify(memoryContextForPrompt)}',
-          JSON.stringify(memoryContextForPrompt)
-        )
+        '${JSON.stringify(memoryContextForPrompt)}',
+        JSON.stringify(memoryContextForPrompt)
+      )
       : SYSTEM_PROMPT.contextBlocks.memoryBlock.empty;
     const balancesBlock = balanceContextForPrompt
       ? SYSTEM_PROMPT.contextBlocks.balancesBlock.withData.replace(
-          '${JSON.stringify(balanceContextForPrompt)}',
-          JSON.stringify(balanceContextForPrompt)
-        )
+        '${JSON.stringify(balanceContextForPrompt)}',
+        JSON.stringify(balanceContextForPrompt)
+      )
       : SYSTEM_PROMPT.contextBlocks.balancesBlock.empty;
     const swapsBlock = swapHistoryContext
       ? SYSTEM_PROMPT.contextBlocks.swapsBlock.withData.replace(
-          '${JSON.stringify(swapHistoryContext)}',
-          JSON.stringify(swapHistoryContext)
-        )
+        '${JSON.stringify(swapHistoryContext)}',
+        JSON.stringify(swapHistoryContext)
+      )
       : SYSTEM_PROMPT.contextBlocks.swapsBlock.empty;
 
     const selectedChainBlock = typeof selectedChain === 'string' && selectedChain.length > 0
@@ -667,14 +714,14 @@ export async function POST(req: Request) {
     console.log('[chat] model candidates', modelCandidates);
     const normalizedHistory = Array.isArray(history)
       ? history
-          .filter((entry) => entry && typeof entry === 'object')
-          .map((entry) => {
-            const item = entry as { role?: string; content?: string };
-            return {
-              role: item.role ?? 'user',
-              content: item.content ?? '',
-            } as OpenAI.Chat.ChatCompletionMessageParam;
-          })
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => {
+          const item = entry as { role?: string; content?: string };
+          return {
+            role: item.role ?? 'user',
+            content: item.content ?? '',
+          } as OpenAI.Chat.ChatCompletionMessageParam;
+        })
       : [];
 
     const aiResponse: string = await generateChatCompletionWithFallback({
@@ -685,6 +732,7 @@ export async function POST(req: Request) {
         { role: 'user', content: message },
       ],
     });
+    console.log('[chat] llm complete', { requestId, durationMs: Date.now() - t0, aiChars: aiResponse.length });
     console.log('[chat] aiResponse:', aiResponse);
     const intentTypeCandidates = ['SINGLE_CHAIN_SWAP_INTENT', 'CROSS_CHAIN_SWAP_INTENT', 'BRIDGE_INTENT'] as const;
     intentString = intentTypeCandidates.find((candidate) => aiResponse.includes(candidate)) ?? null;
@@ -693,21 +741,12 @@ export async function POST(req: Request) {
     const executionNote: string | null = null;
 
     let cid: string | null = null;
-    console.log('[chat] request complete', {
-      durationMs: Date.now() - t0,
-      hasZgHash: Boolean(zgHash),
-      hasZgError: Boolean(zgError),
-    });
 
     if (typeof resolvedAccessToken === 'string' && resolvedAccessToken.length > 0) {
-      const user = await withWaitLogger(
-        {
-          file: 'altair_backend1/src/app/api/chat/route.ts',
-          target: 'syncUserFromAccessToken',
-          description: 'Privy + Mongo user sync',
-        },
-        () => syncUserFromAccessToken(resolvedAccessToken, { mode: 'runtime' })
-      );
+      const user = syncedUser;
+      if (!user?.UID) {
+        throw new Error('Unable to resolve synced user for chat write');
+      }
       const chatTemplate = resolveMongoTemplate('chat');
       const chatEntry = {
         ...chatTemplate,
@@ -783,15 +822,43 @@ export async function POST(req: Request) {
         })();
       }, 0);
     }
-    return NextResponse.json({
+
+    const responsePayload: ChatApiResponse = {
       content: executionNote ? `${executionNote}\n\n${aiResponse}` : aiResponse,
       zgHash,
       txHash: zgHash,
       zgError,
       cid,
       solAddress: syncedUser?.solAddress ?? null,
-    }, { headers: corsHeaders });
+    };
+
+    if (dedupeKey) {
+      chatCompletedByKey.set(dedupeKey, {
+        expiresAt: Date.now() + CHAT_DEDUPE_TTL_MS,
+        payload: responsePayload,
+      });
+      chatInFlightByKey.delete(dedupeKey);
+      if (resolveInFlight) {
+        resolveInFlight(responsePayload);
+      }
+    }
+
+    console.log('[chat] response sent', {
+      requestId,
+      durationMs: Date.now() - t0,
+      hasZgHash: Boolean(zgHash),
+      hasZgError: Boolean(zgError),
+      cid,
+    });
+
+    return NextResponse.json(responsePayload, { headers: corsHeaders });
   } catch (error) {
+    if (dedupeKey) {
+      chatInFlightByKey.delete(dedupeKey);
+      if (rejectInFlight) {
+        rejectInFlight(error);
+      }
+    }
     console.error('Chat Error:', error);
     const message = error instanceof Error ? error.message : 'Unexpected error';
     return NextResponse.json({ error: message }, { status: 500, headers: corsHeaders });

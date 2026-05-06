@@ -3,22 +3,23 @@
 
 Panels are persistent UI blocks that appear below the top-right action row and remain visible until explicitly dismissed by a close affordance. Unlike dropdowns, panels do **not** dismiss on outside clicks or unrelated UI interactions.
 
-Panel rendering in the frontend is controlled by [`altair_frontend1/config/ui_config.ts`](../../altair_frontend1/config/ui_config.ts:1). The [`WALLET_DISPLAY`](../../altair_frontend1/config/ui_config.ts:6) setting defines the allowed display options (`panel`, `drop_down`) and selects which mode is active via `active`. When `active` is `panel`, the UI renders the persistent panel variant; when `active` is `drop_down`, the UI renders the transient dropdown variant instead.
+Panel rendering in the frontend is controlled by [`altair_frontend1/config/ui_config.ts`](../../../altair_frontend1/config/ui_config.ts). The [`WALLET_DISPLAY`](../../../altair_frontend1/config/ui_config.ts:64) setting defines the allowed display options (`panel`, `drop_down`) and selects which mode is active via `active`. When `active` is `panel`, the UI renders the persistent panel variant; when `active` is `drop_down`, the UI renders the transient dropdown variant instead.
 
 ### Wallet panels (WALLET_PANEL)
 
-The current implementation applies panel behavior to the wallet display in [`altair_frontend1/src/components/UserMenu.tsx`](../../altair_frontend1/src/components/UserMenu.tsx:14). When the active mode is `panel`, clicking the wallet control shows a **stack** of wallet panels. Each WALLET_PANEL is an independent instance with its own chain selection dropdown state and close “×”.
+The current implementation applies panel behavior to the wallet display in [`altair_frontend1/src/components/UserMenu.tsx`](../../../altair_frontend1/src/components/UserMenu.tsx). When the active mode is `panel`, clicking the wallet control shows a **stack** of wallet panels. Each WALLET_PANEL is an independent instance with its own chain selection dropdown state and close “×”.
 
 The wallet panel stack is stored in state as a list of panel objects (`walletPanels`) and rendered in order. Each panel object includes:
 - `id` (stable key)
 - `chainKey` (which chain’s balances are shown)
 - `isChainOpen` (whether that panel’s chain dropdown is open)
 
-Each WALLET_PANEL uses [`WALLET_DISPLAY`](../../altair_frontend1/config/ui_config.ts:6) for sizing, padding, fonts, and dropdown sizing. Token row styling comes from `WALLET_DISPLAY.rows`, `WALLET_DISPLAY.tokenSymbols`, and `WALLET_DISPLAY.tokenBalances`.
+Each WALLET_PANEL uses [`WALLET_DISPLAY`](../../../altair_frontend1/config/ui_config.ts:64) for sizing, padding, fonts, and dropdown sizing. Token row styling comes from `WALLET_DISPLAY.rows`, `WALLET_DISPLAY.tokenSymbols`, and `WALLET_DISPLAY.tokenBalances`.
 
-Chain labels and dropdown options are config-driven:
-- `WALLET_CHAIN_LABELS` controls panel titles (including testnet naming rules).
-- `WALLET_CHAIN_OPTIONS` drives dropdown option lists.
+Chain labels and dropdown options are config-driven through [`CHAIN_OPTIONS`](../../../altair_frontend1/config/ui_config.ts:231):
+- Each entry has `enabled`, `isTestnet`, and two label groups: `activeNetwork` (used by the top network selector) and `walletDisplay` (used by panel/dropdown titles and chain dropdowns).
+- `walletDisplay.dropdownLabel` and `walletDisplay.selectedLabel` populate the WALLET_PANEL title and the per-chain options. Testnet vs mainnet inclusion is gated by `enableTestnets` / `enableMainnets`.
+- `ALL_CHAINS` is a synthetic entry used by the wallet/add-panel dropdowns to render an "All Chains" view; it has no `activeNetwork` labels.
 ### ADD_PANEL (panel adder)
 
 The ADD_PANEL is the compact panel used to add new WALLET_PANEL instances. It is rendered beneath the wallet panel stack and persists across outside clicks. The ADD_PANEL includes:
@@ -34,15 +35,15 @@ Close behavior:
 
 ### Panel state persistence across open/close cycles
 
-When the wallet button is clicked to dismiss the panel stack (toggling `isWalletPanelOpen` off), the code in [`altair_frontend1/src/components/UserMenu.tsx`](../../altair_frontend1/src/components/UserMenu.tsx) only clears the `walletPanels` array if there is exactly **one** panel open at the time of dismissal. If two or more panels are open, the array is left intact.
+When the wallet button is clicked to dismiss the panel stack (toggling `isWalletPanelOpen` off), the dismissal handler in [`altair_frontend1/src/components/UserMenu.tsx:2447`](../../../altair_frontend1/src/components/UserMenu.tsx) only clears the `walletPanels` array if there is exactly **one** panel open at the time of dismissal: `setWalletPanels((existing) => (existing.length === 1 ? [] : existing));`. If two or more panels are open, the array is left intact.
 
-On the next wallet button click, `initWalletPanels` (in [`altair_frontend1/src/lib/usePanels.ts`](../../altair_frontend1/src/lib/usePanels.ts)) detects `existing.length > 0` and skips re-initialization, so the previous panel configuration (all open chains) is restored. This is intentional: panels remember their state across open/close cycles when more than one panel was open.
+On the next wallet button click, `initWalletPanels` (in [`altair_frontend1/src/lib/usePanels.ts:46`](../../../altair_frontend1/src/lib/usePanels.ts)) detects `existing.length > 0` and skips re-initialization, so the previous panel configuration (all open chains) is restored. This is intentional: panels remember their state across open/close cycles when more than one panel was open.
 
 ---
 
 ## Balance update behavior in wallet panels
 
-Wallet panels and the wallet dropdown render from the same balance state (`balancesByChain`) in [`UserMenu.tsx`](../../altair_frontend1/src/components/UserMenu.tsx:37).
+Wallet panels and the wallet dropdown render from the same balance state (`balancesByChain`) in [`UserMenu.tsx:70`](../../../altair_frontend1/src/components/UserMenu.tsx).
 
 ### Rendering path
 
@@ -60,7 +61,7 @@ When frontend receives `altair:swap-complete`:
 2. Affected chain caches are marked stale.
 3. All affected chains are force-refreshed from `/api/balances`.
 
-Reference: [`handleSwapComplete()`](../../altair_frontend1/src/components/UserMenu.tsx:723).
+Reference: [`handleSwapComplete()`](../../../altair_frontend1/src/components/UserMenu.tsx) at line 1131.
 
 ### Why this matters for panel mode
 

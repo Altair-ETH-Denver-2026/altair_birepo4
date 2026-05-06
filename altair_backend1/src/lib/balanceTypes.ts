@@ -1,4 +1,4 @@
-import type { ChainKey } from './blockchain_config';
+import type { ChainKey } from '../../config/blockchain_config';
 
 export type ApiBalanceSource = 'cache' | 'mongo' | 'blockchain' | 'stale';
 

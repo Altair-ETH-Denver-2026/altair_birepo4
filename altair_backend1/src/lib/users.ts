@@ -24,6 +24,11 @@ type SyncUserOptions = {
   mode?: UserSyncMode;
 };
 
+const runtimeDefaultTokenInitInFlight = new Map<string, Promise<void>>();
+const loginUidResolveInFlight = new Map<string, Promise<string>>();
+const loginUidCache = new Map<string, { uid: string; expiresAt: number }>();
+const LOGIN_UID_CACHE_TTL_MS = 10_000;
+
 function normalizeEvmWalletAddress(address: string): string {
   return address.startsWith('0x') ? address : `0x${address}`;
 }
@@ -327,21 +332,43 @@ export async function syncUserFromAccessToken(accessToken: string, options: Sync
             UID: await generateUserID(),
           },
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: 'after' }
       )
   );
 
-  // Ensure default tokens are initialized in MongoDB for all chains
-  // This runs asynchronously in the background
+  // Ensure default tokens are initialized in MongoDB for all chains.
+  // Runtime sync must not block hot paths (e.g. /api/chat).
   if (result?.UID) {
     const chains = Object.keys(DEFAULT_TOKENS) as ChainKey[];
-    for (const chainKey of chains) {
-      try {
-        await ensureDefaultTokensInMongoDB(result.UID, chainKey);
-      } catch (error) {
-        console.error(`Failed to ensure default tokens for chain ${chainKey}:`, error);
-        // Don't fail the whole sync if token initialization fails
+    if (mode === 'runtime') {
+      if (!runtimeDefaultTokenInitInFlight.has(result.UID)) {
+        const work = (async () => {
+          try {
+            await Promise.allSettled(
+              chains.map(async (chainKey) => {
+                try {
+                  await ensureDefaultTokensInMongoDB(result.UID, chainKey);
+                } catch (error) {
+                  console.error(`Failed to ensure default tokens for chain ${chainKey}:`, error);
+                }
+              })
+            );
+          } finally {
+            runtimeDefaultTokenInitInFlight.delete(result.UID);
+          }
+        })();
+        runtimeDefaultTokenInitInFlight.set(result.UID, work);
       }
+    } else if (mode === 'createAccount') {
+      await Promise.allSettled(
+        chains.map(async (chainKey) => {
+          try {
+            await ensureDefaultTokensInMongoDB(result.UID, chainKey);
+          } catch (error) {
+            console.error(`Failed to ensure default tokens for chain ${chainKey}:`, error);
+          }
+        })
+      );
     }
   }
 
@@ -356,16 +383,48 @@ export async function getUserUIDFromAccessTokenByMode(
   accessToken: string,
   mode: UserSyncMode
 ): Promise<string> {
-  const synced = await withWaitLogger(
-    {
-      file: 'altair_backend1/src/lib/users.ts',
-      target: 'syncUserFromAccessToken',
-      description: `resolve user UID (${mode})`,
-    },
-    () => syncUserFromAccessToken(accessToken, { mode })
-  );
-  if (!synced?.UID) {
-    throw new Error('Unable to resolve UID for access token');
+  const resolveUid = async (): Promise<string> => {
+    const synced = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/lib/users.ts',
+        target: 'syncUserFromAccessToken',
+        description: `resolve user UID (${mode})`,
+      },
+      () => syncUserFromAccessToken(accessToken, { mode })
+    );
+    if (!synced?.UID) {
+      throw new Error('Unable to resolve UID for access token');
+    }
+    return synced.UID;
+  };
+
+  if (mode !== 'login') {
+    return resolveUid();
   }
-  return synced.UID;
+
+  const now = Date.now();
+  const cached = loginUidCache.get(accessToken);
+  if (cached && cached.expiresAt > now) {
+    return cached.uid;
+  }
+  if (cached && cached.expiresAt <= now) {
+    loginUidCache.delete(accessToken);
+  }
+
+  const inFlight = loginUidResolveInFlight.get(accessToken);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const work = resolveUid()
+    .then((uid) => {
+      loginUidCache.set(accessToken, { uid, expiresAt: Date.now() + LOGIN_UID_CACHE_TTL_MS });
+      return uid;
+    })
+    .finally(() => {
+      loginUidResolveInFlight.delete(accessToken);
+    });
+
+  loginUidResolveInFlight.set(accessToken, work);
+  return work;
 }

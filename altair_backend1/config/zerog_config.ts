@@ -8,7 +8,7 @@ export const ZG_NAMESPACE = {
 
 export type ZgStorageMode = 'onchain_0g' | 'hybrid' | 'local_only'; // storage strategy options for AI memory in Altair
 
-export const ZG_STORAGE_MODE: ZgStorageMode = 'hybrid'; // default mode blending 0G onchain storage with local fallback
+export const ZG_STORAGE_MODE: ZgStorageMode = 'local_only'; // default mode blending 0G onchain storage with local fallback
 
 export const ZG_JSONS = {
   chat: {

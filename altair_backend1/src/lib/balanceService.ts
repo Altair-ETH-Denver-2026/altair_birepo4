@@ -1,7 +1,7 @@
 import { User } from '@/models/User';
 import { connectToDatabase } from '@/lib/db';
 import { withWaitLogger } from '@/lib/waitLogger';
-import { ChainKey, DEFAULT_TOKENS, CHAINS, GAS_TOKENS } from '../../config/blockchain_config';
+import { ChainKey, DEFAULT_TOKENS, CHAINS, GAS_TOKENS, BALANCE_RULES } from '../../config/blockchain_config';
 import * as EthTokens from '../../config/token_info/eth_tokens';
 import * as EthSepoliaTokens from '../../config/token_info/eth_sepolia_testnet_tokens';
 import * as BaseTokens from '../../config/token_info/base_tokens';
@@ -91,40 +91,7 @@ export async function getBalancesFromMongoDB(
         }
       }
     }
-    // Fallback to chain label (old schema for backward compatibility)
-    else {
-      // Determine chain label for backward compatibility
-      let chainLabel: string;
-      switch (chainKey) {
-        case 'ETH_MAINNET':
-        case 'ETH_SEPOLIA':
-          chainLabel = 'Ethereum';
-          break;
-        case 'BASE_MAINNET':
-        case 'BASE_SEPOLIA':
-          chainLabel = 'Base';
-          break;
-        case 'SOLANA_MAINNET':
-          chainLabel = 'Solana';
-          break;
-        default:
-          chainLabel = chainKey;
-      }
-      
-      if (balances[chainLabel]) {
-        const labelBalances = balances[chainLabel] as Record<string, BalanceEntry[]>;
-        
-        // Convert from array format to object format (take first element of each array)
-        const convertedBalances: Record<string, BalanceEntry> = {};
-        Object.entries(labelBalances).forEach(([symbol, entries]) => {
-          if (Array.isArray(entries) && entries.length > 0) {
-            convertedBalances[symbol] = entries[0];
-          }
-        });
-        
-        chainBalances = convertedBalances;
-      }
-    }
+    // Chain-key-only schema: no legacy label fallback.
     
     if (!chainBalances) {
       return null;
@@ -206,23 +173,6 @@ export async function updateBalancesInMongoDB(
       return out;
     };
 
-    let chainLabel: string;
-    switch (chainKey) {
-      case 'ETH_MAINNET':
-      case 'ETH_SEPOLIA':
-        chainLabel = 'Ethereum';
-        break;
-      case 'BASE_MAINNET':
-      case 'BASE_SEPOLIA':
-        chainLabel = 'Base';
-        break;
-      case 'SOLANA_MAINNET':
-        chainLabel = 'Solana';
-        break;
-      default:
-        chainLabel = chainKey;
-    }
-
     const existingUser = await withWaitLogger(
       {
         file: 'altair_backend1/src/lib/balanceService.ts',
@@ -238,7 +188,7 @@ export async function updateBalancesInMongoDB(
     }
 
     const existingBalances = (existingUser as any).balances as Record<string, unknown> | undefined;
-    const existingChainRaw = existingBalances?.[chainKey] ?? existingBalances?.[chainLabel];
+    const existingChainRaw = existingBalances?.[chainKey];
     const chainBalances = normalizeExistingChainBalances(existingChainRaw);
 
     Object.entries(balances).forEach(([symbol, entry]) => {
@@ -289,7 +239,14 @@ export async function updateBalancesInMongoDB(
       },
       () => User.updateOne(
         { UID: uid },
-        { $set: updateData }
+        {
+          $set: updateData,
+          $unset: {
+            'balances.Base': '',
+            'balances.Ethereum': '',
+            'balances.Solana': '',
+          },
+        }
       )
     );
 
@@ -301,6 +258,91 @@ export async function updateBalancesInMongoDB(
     return result.modifiedCount > 0;
   } catch (error) {
     console.error('Error updating balances in MongoDB:', error);
+    return false;
+  }
+}
+
+export async function updateBalancesSnapshotInMongoDB(
+  uid: string,
+  balancesByChain: Partial<Record<ChainKey, Record<string, BalanceEntry>>>,
+  source: 'blockchain' | 'cache' | 'mongo' = 'blockchain'
+): Promise<boolean> {
+  await connectToDatabase();
+
+  try {
+    const now = Date.now();
+
+    const sanitizeSymbolForMongoKey = (value: string): string => {
+      const trimmed = value.trim();
+      const withoutLeadingDollar = trimmed.replace(/^\$+/, '');
+      const normalized = withoutLeadingDollar.trim().toUpperCase();
+      return normalized.length > 0 ? normalized : 'UNKNOWN';
+    };
+
+    const normalizeTokenAddress = (chainKey: ChainKey, value: unknown): string => {
+      if (typeof value !== 'string') return '';
+      const trimmed = value.trim();
+      if (!trimmed) return '';
+      return chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET' ? trimmed : trimmed.toLowerCase();
+    };
+
+    const updateSet: Record<string, unknown> = {
+      lastSeenAt: new Date(),
+    };
+
+    (Object.entries(balancesByChain) as Array<[ChainKey, Record<string, BalanceEntry> | undefined]>).forEach(
+      ([chainKey, chainBalancesRaw]) => {
+        if (!chainBalancesRaw || typeof chainBalancesRaw !== 'object') return;
+
+        const chainBalances: Record<string, BalanceEntry[]> = {};
+        Object.entries(chainBalancesRaw).forEach(([symbol, entry]) => {
+          if (!entry || typeof entry !== 'object') return;
+          const safeSymbol = sanitizeSymbolForMongoKey(symbol);
+          const normalizedAddress = normalizeTokenAddress(chainKey, entry.address ?? '');
+          chainBalances[safeSymbol] = [{
+            ...entry,
+            symbol: safeSymbol,
+            address: normalizedAddress,
+            source,
+            verifiedAt: source === 'blockchain' ? now : (entry.verifiedAt ?? now),
+          }];
+        });
+
+        updateSet[`balances.${chainKey}`] = chainBalances;
+      }
+    );
+
+    if (Object.keys(updateSet).length === 1) {
+      return true;
+    }
+
+    const result = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/lib/balanceService.ts',
+        target: 'User.updateOne',
+        description: 'update multi-chain user balances in MongoDB',
+      },
+      () => User.updateOne(
+        { UID: uid },
+        {
+          $set: updateSet,
+          $unset: {
+            'balances.Base': '',
+            'balances.Ethereum': '',
+            'balances.Solana': '',
+          },
+        }
+      )
+    );
+
+    if (result.matchedCount === 0) {
+      console.warn(`[balances] skipped snapshot balance update; user not found for UID ${uid}`);
+      return false;
+    }
+
+    return result.modifiedCount > 0;
+  } catch (error) {
+    console.error('Error updating snapshot balances in MongoDB:', error);
     return false;
   }
 }
@@ -350,35 +392,6 @@ export async function getChainsWithBalances(uid: string): Promise<ChainKey[]> {
             chains.push(chainKey);
             continue;
           }
-        }
-      }
-      
-      // Check for chain label (old schema for backward compatibility)
-      let chainLabel: string;
-      switch (chainKey) {
-        case 'ETH_MAINNET':
-        case 'ETH_SEPOLIA':
-          chainLabel = 'Ethereum';
-          break;
-        case 'BASE_MAINNET':
-        case 'BASE_SEPOLIA':
-          chainLabel = 'Base';
-          break;
-        case 'SOLANA_MAINNET':
-          chainLabel = 'Solana';
-          break;
-        default:
-          chainLabel = chainKey;
-      }
-      
-      if (balances[chainLabel]) {
-        const labelBalances = balances[chainLabel] as Record<string, any>;
-        // Check if there are any token entries (array with at least one element)
-        const hasEntries = Object.values(labelBalances).some(
-          (entries: any) => Array.isArray(entries) && entries.length > 0
-        );
-        if (hasEntries) {
-          chains.push(chainKey);
         }
       }
     }
@@ -441,41 +454,6 @@ export async function getAllUserTokens(uid: string): Promise<Record<ChainKey, Re
           }
         }
       }
-      // Then try chain label (old schema for backward compatibility)
-      else {
-        // Determine chain label for backward compatibility
-        let chainLabel: string;
-        switch (chainKey) {
-          case 'ETH_MAINNET':
-          case 'ETH_SEPOLIA':
-            chainLabel = 'Ethereum';
-            break;
-          case 'BASE_MAINNET':
-          case 'BASE_SEPOLIA':
-            chainLabel = 'Base';
-            break;
-          case 'SOLANA_MAINNET':
-            chainLabel = 'Solana';
-            break;
-          default:
-            chainLabel = chainKey;
-        }
-        
-        if (balances[chainLabel]) {
-          const labelBalances = balances[chainLabel] as Record<string, BalanceEntry[]>;
-          // Convert from array format to object format (take first element of each array)
-          const convertedBalances: Record<string, BalanceEntry> = {};
-          Object.entries(labelBalances).forEach(([symbol, entries]) => {
-            if (Array.isArray(entries) && entries.length > 0) {
-              convertedBalances[symbol] = entries[0];
-            }
-          });
-          
-          if (Object.keys(convertedBalances).length > 0) {
-            chainBalances = convertedBalances;
-          }
-        }
-      }
       
       if (chainBalances) {
         result[chainKey] = chainBalances;
@@ -520,24 +498,34 @@ export async function getUIDFromAccessToken(accessToken: string): Promise<string
 
 /**
  * Check if balances need verification (stale or never verified)
+ * Checks individual token verifiedAt timestamps
  */
 export function shouldVerifyBalances(
   balances: Record<string, BalanceEntry> | null,
-  maxAgeMs: number = 5 * 60 * 1000 // 5 minutes default
+  maxAgeMs: number = BALANCE_RULES.staleness.staleTimer // Use configured stale timer
 ): boolean {
   if (!balances) {
     return true; // No balances, need verification
   }
 
-  // Check metadata for last verification
-  const metadata = (balances as any).$metadata;
-  if (metadata?.lastBlockchainVerification) {
-    const lastVerification = new Date(metadata.lastBlockchainVerification).getTime();
-    const now = Date.now();
-    return (now - lastVerification) > maxAgeMs;
+  const now = Date.now();
+  
+  // Check if any token needs verification
+  for (const [symbol, entry] of Object.entries(balances)) {
+    if (!entry.verifiedAt) {
+      // Token has never been verified
+      return true;
+    }
+    
+    const timeSinceVerification = now - entry.verifiedAt;
+    if (timeSinceVerification > maxAgeMs) {
+      // Token verification is stale
+      return true;
+    }
   }
-
-  return true; // No verification timestamp, need verification
+  
+  // All tokens have been verified recently
+  return false;
 }
 
 /**
@@ -735,27 +723,7 @@ export async function ensureDefaultTokensInMongoDB(
     const balancesObj = (user.balances ?? {}) as Record<string, unknown>;
     let currentChainBalances = balancesObj[chainKey] as Record<string, BalanceEntry[]> | undefined;
     
-    // If not found with chain key, try chain label (backward compatibility)
-    if (!currentChainBalances) {
-      // Determine chain label for backward compatibility check
-      let chainLabel: string;
-      switch (chainKey) {
-        case 'ETH_MAINNET':
-        case 'ETH_SEPOLIA':
-          chainLabel = 'Ethereum';
-          break;
-        case 'BASE_MAINNET':
-        case 'BASE_SEPOLIA':
-          chainLabel = 'Base';
-          break;
-        case 'SOLANA_MAINNET':
-          chainLabel = 'Solana';
-          break;
-        default:
-          chainLabel = chainKey;
-      }
-      currentChainBalances = balancesObj[chainLabel] as Record<string, BalanceEntry[]> | undefined;
-    }
+    // Chain-key-only schema: no legacy label fallback.
     
     // Check if we need to add any missing tokens
     const missingTokens = defaultTokens.filter(token => {
@@ -808,7 +776,17 @@ export async function ensureDefaultTokensInMongoDB(
         target: 'User.updateOne',
         description: 'initialize default tokens in MongoDB',
       },
-      () => User.updateOne({ UID: uid }, { $set: updatePayload })
+      () => User.updateOne(
+        { UID: uid },
+        {
+          $set: updatePayload,
+          $unset: {
+            'balances.Base': '',
+            'balances.Ethereum': '',
+            'balances.Solana': '',
+          },
+        }
+      )
     );
     
     const success = result.modifiedCount > 0 || result.upsertedCount > 0;
