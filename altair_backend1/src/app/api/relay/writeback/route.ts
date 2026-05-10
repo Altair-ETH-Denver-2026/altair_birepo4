@@ -8,7 +8,7 @@ import { appendSwapToHistory } from '@/lib/zg-storage';
 import { withWaitLogger } from '@/lib/waitLogger';
 import { syncUserFromAccessToken } from '@/lib/users';
 import { buildCorsHeaders } from '@/lib/appUrls';
-import { type BalanceEntry, updateBalancesInMongoDB } from '@/lib/balanceService';
+import { type BalanceEntry, updateBalancesInMongoDB, getBalancesFromMongoDB } from '@/lib/balanceService';
 import { CHAINS, type ChainKey } from '../../../../../config/blockchain_config';
 import { computeFeeAmount } from '@/lib/feeResolver';
 
@@ -277,9 +277,7 @@ export async function POST(req: Request) {
       buyToken: payload.buyToken,
     });
 
-    // --- Altair fee computation (EARLY) ---
-    // Declare this early so it can be used in sellToken/buyToken construction
-    // Will be populated after confirmed buy amount is resolved
+    // Declare resolvedAltairFee variable that will be populated later
     let resolvedAltairFee: { token: string; amount: string; decimals: number | null; bps: number } | null = null;
 
     const sellToken = {
@@ -306,10 +304,10 @@ export async function POST(req: Request) {
             (typeof payload.sellToken.fees?.provider?.decimals === 'number' ? payload.sellToken.fees.provider.decimals : null),
         },
         altair: {
-          token: resolvedAltairFee?.token ?? payload.sellToken.fees?.altair?.token ?? '',
-          amount: resolvedAltairFee?.amount ?? payload.sellToken.fees?.altair?.amount ?? '',
-          decimals: resolvedAltairFee?.decimals ?? (typeof payload.sellToken.fees?.altair?.decimals === 'number' ? payload.sellToken.fees.altair.decimals : null),
-          bps: resolvedAltairFee?.bps ?? payload.sellToken.fees?.altair?.bps ?? null,
+          token: payload.sellToken.fees?.altair?.token ?? '',
+          amount: payload.sellToken.fees?.altair?.amount ?? '',
+          decimals: typeof payload.sellToken.fees?.altair?.decimals === 'number' ? payload.sellToken.fees.altair.decimals : null,
+          bps: payload.sellToken.fees?.altair?.bps ?? null,
         },
       },
     };
@@ -335,10 +333,10 @@ export async function POST(req: Request) {
           decimals: typeof payload.buyToken.fees?.provider?.decimals === 'number' ? payload.buyToken.fees.provider.decimals : null,
         },
         altair: {
-          token: resolvedAltairFee?.token ?? payload.buyToken.fees?.altair?.token ?? '',
-          amount: resolvedAltairFee?.amount ?? payload.buyToken.fees?.altair?.amount ?? '',
-          decimals: resolvedAltairFee?.decimals ?? (typeof payload.buyToken.fees?.altair?.decimals === 'number' ? payload.buyToken.fees.altair.decimals : null),
-          bps: resolvedAltairFee?.bps ?? payload.buyToken.fees?.altair?.bps ?? null,
+          token: payload.buyToken.fees?.altair?.token ?? '',
+          amount: payload.buyToken.fees?.altair?.amount ?? '',
+          decimals: typeof payload.buyToken.fees?.altair?.decimals === 'number' ? payload.buyToken.fees.altair.decimals : null,
+          bps: payload.buyToken.fees?.altair?.bps ?? null,
         },
       },
     };
@@ -360,98 +358,70 @@ export async function POST(req: Request) {
       );
     }
 
-    // If we got a confirmed amount, override buyToken.amount and recompute
-    // buyToken.balanceAfter using the same gas-correction logic the frontend uses.
-    if (confirmedBuyAmountRaw !== null) {
-      buyToken.amount = confirmedBuyAmountRaw;
-
-      // Recompute balanceAfter: buyBalanceBefore + confirmedBuyAmount - gasFee (if buy = gas token)
-      const buySymbolForGasCheck = buyToken.symbol?.trim().toUpperCase() ?? '';
-      const gasTokenSymbolForCheck = sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
-      const gasIsGasBuy = buySymbolForGasCheck === gasTokenSymbolForCheck && gasTokenSymbolForCheck !== '';
-
-      const buyBalanceBeforeRaw = buyToken.balanceBefore?.trim() ?? '';
-      const gasFeeRaw = parseRawAmount(sellToken.fees?.gas?.amount ?? null) ?? 0n;
-
-      if (buyBalanceBeforeRaw) {
-        try {
-          const before = BigInt(buyBalanceBeforeRaw);
-          const amount = BigInt(confirmedBuyAmountRaw);
-          const gas = gasIsGasBuy ? gasFeeRaw : 0n;
-          const after = before + amount - gas;
-          buyToken.balanceAfter = (after >= 0n ? after : 0n).toString();
-          console.log('[relay/writeback] Recomputed buyToken.balanceAfter from confirmed amount', {
-            requestId,
-            confirmedBuyAmountRaw,
-            buyBalanceBeforeRaw,
-            gasFeeRaw: gasFeeRaw.toString(),
-            gasIsGasBuy,
-            buyBalanceAfter: buyToken.balanceAfter,
-          });
-        } catch (err) {
-          console.warn('[relay/writeback] Failed to recompute buyToken.balanceAfter', { err });
-        }
-      }
-    }
-
-    // --- Altair fee computation (POPULATE) ---
-    // The fee is deducted from the buy token (output) by Relay.
-    // Compute it from the (possibly confirmed) buy amount.
-    if (payload._altairFee && payload._altairFee.bps > 0) {
-      const buyAmountForFee = confirmedBuyAmountRaw ?? buyToken.amount;
-      const feeAmount = computeFeeAmount(buyAmountForFee, payload._altairFee.bps);
-      if (feeAmount !== '0') {
-        resolvedAltairFee = {
-          token: payload._altairFee.token || buyToken.symbol || '',
-          amount: feeAmount,
-          decimals: payload._altairFee.decimals ?? buyToken.decimals,
-          bps: payload._altairFee.bps,
-        };
-        console.log('[relay/writeback] Computed Altair fee', {
-          buyAmountForFee,
-          feeBps: payload._altairFee.bps,
-          feeAmount,
-          resolvedAltairFee,
-        });
-      }
-    }
-
-    const SID = await generateSwapID();
-
-    const swapDoc = {
-      SID,
-      UID: user.UID,
-      CID: payload.cid ?? null,
-      provider: 'Relay',
-      intentString: payload.intentString ?? null,
-      sellToken,
-      buyToken,
-      txHash: payload.txHash ?? payload.requestId ?? null,
-      timestamp: new Date().toISOString(),
-    };
-
-    await withWaitLogger(
-      {
-        file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
-        target: 'Swap.create',
-        description: 'Mongo relay swap write',
-      },
-      () => Swap.create(swapDoc)
-    );
-
+    // Fetch balanceBefore from MongoDB when not provided by frontend
     const sellChainKey = normalizeChainKey(sellToken.chain);
-    
-    console.log('[relay/writeback] sellToken state before computation', {
-      chain: sellToken.chain,
-      symbol: sellToken.symbol,
-      amount: sellToken.amount,
-      balanceBefore: sellToken.balanceBefore,
-      balanceAfter: sellToken.balanceAfter,
-      hasGasFee: !!sellToken.fees?.gas?.amount,
-    });
-    
-    // If sellToken.balanceAfter is null, try to compute it from balanceBefore - amount - gas
-    if (sellChainKey && !sellToken.balanceAfter && sellToken.balanceBefore && sellToken.amount) {
+    const buyChainKey = normalizeChainKey(buyToken.chain);
+
+    // Fetch sell token balance from MongoDB if missing
+    if (!sellToken.balanceBefore && sellChainKey && sellToken.symbol) {
+      try {
+        const sellBalances = await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+            target: 'getBalancesFromMongoDB(sellToken)',
+            description: 'fetch sell token balance from MongoDB',
+          },
+          () => getBalancesFromMongoDB(user.UID, sellChainKey)
+        );
+        const sellBalance = sellBalances?.[sellToken.symbol];
+        if (sellBalance?.balance) {
+          sellToken.balanceBefore = sellBalance.balance;
+          console.log('[relay/writeback] Fetched sellToken.balanceBefore from MongoDB', {
+            chain: sellChainKey,
+            symbol: sellToken.symbol,
+            balance: sellBalance.balance,
+          });
+        }
+      } catch (err) {
+        console.warn('[relay/writeback] Failed to fetch sellToken.balanceBefore from MongoDB', { err });
+      }
+    }
+
+    // Fetch buy token balance from MongoDB if missing
+    if (!buyToken.balanceBefore && buyChainKey && buyToken.symbol) {
+      try {
+        const buyBalances = await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+            target: 'getBalancesFromMongoDB(buyToken)',
+            description: 'fetch buy token balance from MongoDB',
+          },
+          () => getBalancesFromMongoDB(user.UID, buyChainKey)
+        );
+        const buyBalance = buyBalances?.[buyToken.symbol];
+        if (buyBalance?.balance) {
+          buyToken.balanceBefore = buyBalance.balance;
+          console.log('[relay/writeback] Fetched buyToken.balanceBefore from MongoDB', {
+            chain: buyChainKey,
+            symbol: buyToken.symbol,
+            balance: buyBalance.balance,
+          });
+        } else {
+          // If not in MongoDB, assume 0 (user doesn't have this token yet)
+          buyToken.balanceBefore = '0';
+          console.log('[relay/writeback] Set buyToken.balanceBefore to 0 (not in MongoDB)', {
+            chain: buyChainKey,
+            symbol: buyToken.symbol,
+          });
+        }
+      } catch (err) {
+        console.warn('[relay/writeback] Failed to fetch buyToken.balanceBefore from MongoDB', { err });
+        buyToken.balanceBefore = '0';
+      }
+    }
+
+    // Compute sellToken.balanceAfter: balanceBefore - sellAmount - gasFee (if sell = gas token)
+    if (sellToken.balanceBefore && sellToken.amount) {
       try {
         const before = BigInt(sellToken.balanceBefore);
         const amount = BigInt(sellToken.amount);
@@ -463,16 +433,88 @@ export async function POST(req: Request) {
         const after = before - amount - gas;
         sellToken.balanceAfter = (after >= 0n ? after : 0n).toString();
         console.log('[relay/writeback] Computed sellToken.balanceAfter', {
-          before: sellToken.balanceBefore,
+          balanceBefore: sellToken.balanceBefore,
           amount: sellToken.amount,
           gas: gas.toString(),
-          after: sellToken.balanceAfter,
+          balanceAfter: sellToken.balanceAfter,
         });
       } catch (err) {
         console.warn('[relay/writeback] Failed to compute sellToken.balanceAfter', { err });
       }
     }
-    
+
+    // If we got a confirmed buy amount from Relay, use it
+    if (confirmedBuyAmountRaw !== null) {
+      buyToken.amount = confirmedBuyAmountRaw;
+    }
+
+    // Compute buyToken.balanceAfter: balanceBefore + buyAmount - gasFee (if buy = gas token)
+    // Use confirmed amount from Relay if available, otherwise use frontend-provided amount
+    if (buyToken.balanceBefore && buyToken.amount) {
+      try {
+        const buySymbolForGasCheck = buyToken.symbol?.trim().toUpperCase() ?? '';
+        const gasTokenSymbolForCheck = sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
+        const gasIsGasBuy = buySymbolForGasCheck === gasTokenSymbolForCheck && gasTokenSymbolForCheck !== '';
+
+        const before = BigInt(buyToken.balanceBefore);
+        const amount = BigInt(buyToken.amount);
+        const gasFeeRaw = parseRawAmount(sellToken.fees?.gas?.amount ?? null) ?? 0n;
+        const gas = gasIsGasBuy ? gasFeeRaw : 0n;
+        const after = before + amount - gas;
+        buyToken.balanceAfter = (after >= 0n ? after : 0n).toString();
+        console.log('[relay/writeback] Computed buyToken.balanceAfter', {
+          balanceBefore: buyToken.balanceBefore,
+          buyAmount: buyToken.amount,
+          confirmedFromRelay: confirmedBuyAmountRaw !== null,
+          gasFeeRaw: gasFeeRaw.toString(),
+          gasIsGasBuy,
+          balanceAfter: buyToken.balanceAfter,
+        });
+      } catch (err) {
+        console.warn('[relay/writeback] Failed to compute buyToken.balanceAfter', { err });
+      }
+    }
+
+    // --- Altair fee computation (POPULATE) ---
+    // The fee is deducted from the buy token (output) by Relay.
+    // Compute it from the (possibly confirmed) buy amount.
+    if (payload._altairFee && payload._altairFee.bps > 0) {
+      const buyAmountForFee = confirmedBuyAmountRaw ?? buyToken.amount;
+      const feeAmount = computeFeeAmount(buyAmountForFee, payload._altairFee.bps);
+      if (feeAmount !== '0') {
+        resolvedAltairFee = {
+          token: buyToken.symbol || '',  // Use symbol, not address
+          amount: feeAmount,
+          decimals: payload._altairFee.decimals ?? buyToken.decimals,
+          bps: payload._altairFee.bps,
+        };
+        console.log('[relay/writeback] Computed Altair fee', {
+          buyAmountForFee,
+          feeBps: payload._altairFee.bps,
+          feeAmount,
+          resolvedAltairFee,
+        });
+
+        // Update both sellToken and buyToken with the resolved Altair fee
+        // The fee is taken from the buy token (output), so it's recorded on the buy side
+        buyToken.fees.altair = {
+          token: resolvedAltairFee.token,
+          amount: resolvedAltairFee.amount,
+          decimals: resolvedAltairFee.decimals,
+          bps: resolvedAltairFee.bps,
+        };
+        // Also record on sell side for completeness
+        sellToken.fees.altair = {
+          token: resolvedAltairFee.token,
+          amount: resolvedAltairFee.amount,
+          decimals: resolvedAltairFee.decimals,
+          bps: resolvedAltairFee.bps,
+        };
+      }
+    }
+
+    const SID = await generateSwapID();
+
     const sellBalanceEntry = sellChainKey
       ? toBalanceEntryFromRelayToken({ token: sellToken, chainKey: sellChainKey })
       : null;
@@ -498,8 +540,8 @@ export async function POST(req: Request) {
 
     // Get gas token info early for use in buy token correction
     const gasSymbol = payload.sellToken.fees?.gas?.token?.trim().toUpperCase() ?? '';
-    const gasBalanceAfter = payload.sellToken.fees?.gas?.balanceAfter?.trim() ?? '';
-    const gasBalanceBefore = payload.sellToken.fees?.gas?.balanceBefore?.trim() ?? '';
+    let gasBalanceAfter = payload.sellToken.fees?.gas?.balanceAfter?.trim() ?? '';
+    let gasBalanceBefore = payload.sellToken.fees?.gas?.balanceBefore?.trim() ?? '';
     const gasAmount = payload.sellToken.fees?.gas?.amount?.trim() ?? '';
     const gasDecimals = typeof payload.sellToken.fees?.gas?.decimals === 'number'
       ? payload.sellToken.fees?.gas?.decimals
@@ -507,7 +549,51 @@ export async function POST(req: Request) {
     const sellSymbolNormalized = sellToken.symbol?.trim().toUpperCase() ?? '';
     const buySymbolNormalized = buyToken.symbol?.trim().toUpperCase() ?? '';
 
-    const buyChainKey = normalizeChainKey(buyToken.chain);
+    // Fetch gas token balance from MongoDB if missing and gas token is different from sell/buy
+    if (gasSymbol && gasSymbol !== sellSymbolNormalized && gasSymbol !== buySymbolNormalized) {
+      if (!gasBalanceBefore && sellChainKey) {
+        try {
+          const gasBalances = await withWaitLogger(
+            {
+              file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+              target: 'getBalancesFromMongoDB(gasToken)',
+              description: 'fetch gas token balance from MongoDB',
+            },
+            () => getBalancesFromMongoDB(user.UID, sellChainKey)
+          );
+          const gasBalance = gasBalances?.[gasSymbol];
+          if (gasBalance?.balance) {
+            gasBalanceBefore = gasBalance.balance;
+            console.log('[relay/writeback] Fetched gasBalanceBefore from MongoDB', {
+              chain: sellChainKey,
+              symbol: gasSymbol,
+              balance: gasBalance.balance,
+            });
+          }
+        } catch (err) {
+          console.warn('[relay/writeback] Failed to fetch gasBalanceBefore from MongoDB', { err });
+        }
+      }
+
+      // Compute gasBalanceAfter if we have balanceBefore and amount
+      if (!gasBalanceAfter && gasBalanceBefore && gasAmount) {
+        try {
+          const before = BigInt(gasBalanceBefore);
+          const amount = BigInt(gasAmount);
+          const after = before - amount;
+          gasBalanceAfter = (after >= 0n ? after : 0n).toString();
+          console.log('[relay/writeback] Computed gasBalanceAfter', {
+            balanceBefore: gasBalanceBefore,
+            gasAmount,
+            balanceAfter: gasBalanceAfter,
+          });
+        } catch (err) {
+          console.warn('[relay/writeback] Failed to compute gasBalanceAfter', { err });
+        }
+      }
+    }
+
+    // buyChainKey already declared earlier when fetching balances from MongoDB
     const buyBalanceEntry = buyChainKey
       ? toBalanceEntryFromRelayToken({ token: buyToken, chainKey: buyChainKey })
       : null;
@@ -566,6 +652,36 @@ export async function POST(req: Request) {
         });
       }
     }
+
+    // Save swap document to MongoDB AFTER all balance computations and fee updates
+    const swapDoc = {
+      SID,
+      UID: user.UID,
+      CID: payload.cid ?? null,
+      provider: 'Relay',
+      intentString: payload.intentString ?? null,
+      sellToken,
+      buyToken,
+      txHash: payload.txHash ?? payload.requestId ?? null,
+      timestamp: new Date().toISOString(),
+    };
+
+    console.log('[relay/writeback] Saving swap to MongoDB', {
+      SID,
+      sellTokenSymbol: sellToken.symbol,
+      buyTokenSymbol: buyToken.symbol,
+      sellTokenAltairFee: sellToken.fees?.altair,
+      buyTokenAltairFee: buyToken.fees?.altair,
+    });
+
+    await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/relay/writeback/route.ts',
+        target: 'Swap.create',
+        description: 'Mongo relay swap write',
+      },
+      () => Swap.create(swapDoc)
+    );
 
     if (payload.cid) {
       await withWaitLogger(
