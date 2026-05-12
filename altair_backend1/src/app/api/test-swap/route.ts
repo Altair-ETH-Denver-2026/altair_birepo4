@@ -2406,23 +2406,7 @@ export async function POST(req: Request) {
         );
       }
 
-      const v2Url = new URL('https://api.0x.org/swap/allowance-holder/quote');
-      v2Url.searchParams.set('chainId', String(chainConfig.chainId));
-      v2Url.searchParams.set('sellToken', zeroXV2SellToken);
-      v2Url.searchParams.set('buyToken', zeroXV2BuyToken);
-      v2Url.searchParams.set('sellAmount', sellAmountRaw);
-      v2Url.searchParams.set('taker', recipient);
-      v2Url.searchParams.set('slippageBps', '50');
-      if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
-        // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
-        // swapFeeBps is in basis points (0.5% = 50 bps).
-        // swapFeeToken must be either the buyToken or sellToken address.
-        // We use the buy token since 0x deducts fees from the output.
-        const evmAltairFeeBps = pctToBps(evmAltairFeePct);
-        v2Url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
-        v2Url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
-        v2Url.searchParams.set('swapFeeToken', zeroXV2BuyToken);
-      }
+      const evmAltairFeeBps = evmAltairFeePct !== null && evmAltairFeePct > 0 ? pctToBps(evmAltairFeePct) : null;
 
       const v2CacheKey = buildQuoteCacheKey([
         '0x',
@@ -2437,36 +2421,73 @@ export async function POST(req: Request) {
       if (cachedV2Method) {
         methodParameters = cachedV2Method;
       } else {
+        // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
+        // swapFeeBps is in basis points (0.5% = 50 bps).
+        // swapFeeToken must be either the buyToken or sellToken address.
+        // Fees are deducted from the output (buy token), so we try swapFeeToken=buyToken first.
+        // Some token pairs fail validation with buyToken as the fee token, so we fall back to
+        // sellToken on SWAP_VALIDATION_FAILED.
+        const tryV2Quote = async (feeToken: string): Promise<Response> => {
+          const url = new URL('https://api.0x.org/swap/allowance-holder/quote');
+          url.searchParams.set('chainId', String(chainConfig.chainId));
+          url.searchParams.set('sellToken', zeroXV2SellToken);
+          url.searchParams.set('buyToken', zeroXV2BuyToken);
+          url.searchParams.set('sellAmount', sellAmountRaw);
+          url.searchParams.set('taker', recipient);
+          url.searchParams.set('slippageBps', '50');
+          if (evmFeeRecipient !== null && evmAltairFeeBps !== null) {
+            url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
+            url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
+            url.searchParams.set('swapFeeToken', feeToken);
+          }
+          return fetch(url.toString(), {
+            headers: {
+              Accept: 'application/json',
+              '0x-api-key': zeroXApiKey,
+              '0x-version': 'v2',
+            },
+            method: 'GET',
+          });
+        };
 
-      console.log('[test-swap] 0x v2 request context', {
-        resolvedChainKey,
-        chainConfig,
-        tokenConfig,
-        normalizedSellToken,
-        normalizedBuyToken,
-        zeroXSellToken: zeroXV2SellToken,
-        zeroXBuyToken: zeroXV2BuyToken,
-        sellAmountRaw,
-        recipient,
-        zeroXUrl: v2Url.toString(),
-      });
-
-        const v2Res = await withWaitLogger(
+        // Try with buyToken as fee token first (fees are deducted from output)
+        let v2Res = await withWaitLogger(
           {
             file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v2 quote',
+            target: '0x v2 quote (feeToken=buyToken)',
             description: 'swap quote response',
           },
-          () =>
-            fetch(v2Url.toString(), {
-              headers: {
-                Accept: 'application/json',
-                '0x-api-key': zeroXApiKey,
-                '0x-version': 'v2',
-              },
-              method: 'GET',
-            })
+          () => tryV2Quote(zeroXV2BuyToken)
         );
+
+        // If validation failed, retry with sellToken as fee token
+        if (!v2Res.ok && evmAltairFeeBps !== null) {
+          const errText = await v2Res.text().catch(() => '');
+          if (errText.includes('SWAP_VALIDATION_FAILED')) {
+            console.log('[test-swap] 0x v2 SWAP_VALIDATION_FAILED with feeToken=buyToken, retrying with feeToken=sellToken');
+            v2Res = await withWaitLogger(
+              {
+                file: 'altair_backend1/src/app/api/test-swap/route.ts',
+                target: '0x v2 quote (feeToken=sellToken)',
+                description: 'swap quote response (fallback)',
+              },
+              () => tryV2Quote(zeroXV2SellToken)
+            );
+          }
+        }
+
+        console.log('[test-swap] 0x v2 request context', {
+          resolvedChainKey,
+          chainConfig,
+          tokenConfig,
+          normalizedSellToken,
+          normalizedBuyToken,
+          zeroXSellToken: zeroXV2SellToken,
+          zeroXBuyToken: zeroXV2BuyToken,
+          sellAmountRaw,
+          recipient,
+          zeroXUrl: v2Res.url,
+        });
 
         if (!v2Res.ok) {
           const errText = await v2Res.text();

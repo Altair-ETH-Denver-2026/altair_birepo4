@@ -81,3 +81,35 @@ export const DEFAULT_TOKENS = { // These are added when a user creates their acc
   SOLANA_MAINNET: ['SOL', 'WETH', 'WBTC', 'USDC', 'USDu'],
   SOLANA_DEVNET: ['SOL', 'WETH', 'WBTC', 'USDC', 'USDu'],
 };
+
+export const SWAP_PROVIDER_OPTIONS = {
+  maxAttemptsPerOption: 2, // If a swap fails, it should try again with the next provider option in its respective list. It should try each option a number of times equal to maxAttemptsPerOption. So, if maxAttemptsPerOption is 3, it will try each option 3 times. A value of 0 for maxAttemptsPerOption is treated as infinity, and a swap will keep looping through the options indefinitely.
+  ETH_MAINNET: [
+    '0x v2',
+    '0x v1',
+  ],
+  ETH_SEPOLIA: [
+    '0x v2',
+    '0x v1',
+  ],
+  BASE_MAINNET: [
+    '0x v2',
+    '0x v1',
+  ],
+  BASE_SEPOLIA: [
+    '0x v2',
+    '0x v1',
+  ],
+  SOLANA_MAINNET: [
+    'Jupiter Ultra',
+  ],
+  SOLANA_DEVNET: [
+    'Jupiter Ultra',
+  ],
+  CROSS_CHAIN_SWAP: [
+    'Relay',
+  ],
+  BRIDGE: [
+    'Relay',
+  ]
+}

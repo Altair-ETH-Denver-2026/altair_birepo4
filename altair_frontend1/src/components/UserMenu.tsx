@@ -15,6 +15,7 @@ import { PublicKey } from '@solana/web3.js';
 import { UserRound, LogOut, Settings, Wallet, Wrench, Copy, Globe2, Check } from 'lucide-react';
 import WalletPanel from './panels/WalletPanel';
 import AddPanel from './panels/AddPanel';
+import TransactionInfoPanel from './panels/TransactionInfoPanel';
 import { SpinningLogo } from './SpinningLogo';
 import { useEffect as useClientEffect } from 'react';
 import { BLOCKCHAIN, CHAINS, GAS_RESERVES, GAS_TOKENS, FORCE_QUERY_CHAINS, BALANCE_RULES, type ChainKey } from '../../config/blockchain_config';
@@ -27,7 +28,7 @@ import * as SolanaTokens from '../../config/token_info/solana_tokens';
 import type { ApiChainBalances, ApiTokenBalance } from '../lib/balanceTypes';
 import { normalizeBalancesResponse, resolveTokenRowsForChain } from '../lib/balanceTransforms';
 import { dispatchBalanceUpdated, dispatchBalanceStale } from '../lib/eventTypes';
-import { ACTIVE_NETWORK_DROPDOWN, ADD_PANEL_DISPLAY, BALANCE_DECIMALS, CHAIN_OPTIONS, MENU_ICONS, WALLET_DISPLAY } from '../../config/ui_config';
+import { ACTIVE_NETWORK_DROPDOWN, ADD_PANEL_DISPLAY, BALANCE_DECIMALS, CHAIN_OPTIONS, MENU_ICONS, TRANSACTION_INFO_PANEL_DISPLAY, WALLET_DISPLAY } from '../../config/ui_config';
 
 type UiChainKey = ChainKey | 'ALL';
 type ChainOptionConfig = {
@@ -63,6 +64,10 @@ export default function UserMenu() {
     initWalletPanels,
     closeWalletPanel,
     addWalletPanel,
+    transactionInfoPanels,
+    addTransactionInfoPanel,
+    updateTransactionInfoPanel,
+    closeTransactionInfoPanel,
   } = usePanels({ initialChain: selectedChain });
   const [isDevOpen, setIsDevOpen] = useState(false);
   const [isSwapping, setIsSwapping] = useState(false);
@@ -83,6 +88,8 @@ export default function UserMenu() {
   const [walletAddressCopyState, setWalletAddressCopyState] = useState<Record<string, boolean>>({});
   const walletAddressCopyTimers = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
   const balanceOverrideRef = useRef<Record<string, { value: string; raw?: string; expiresAt: number }>>({});
+  const balancesByChainRef = useRef<Record<ChainKey, ApiChainBalances>>({} as Record<ChainKey, ApiChainBalances>);
+  balancesByChainRef.current = balancesByChain;
   const executeSwap = useSwap(selectedChain);
   const executeSolanaSwap = useSolanaSwap(selectedChain);
   const executeSolanaTransfer = useSolanaTransfer(selectedChain);
@@ -497,6 +504,117 @@ export default function UserMenu() {
   const addPanelChainIconPlaceholderFontColor = typeof addPanelChainIconsConfig?.placeholderFontColor === 'string' ? addPanelChainIconsConfig.placeholderFontColor : '#d1d5db';
   const addPanelChainIconPlaceholderFontSize = typeof addPanelChainIconsConfig?.placeholderFontSize === 'number' ? addPanelChainIconsConfig.placeholderFontSize : 14;
   const addPanelChainIconSpinEnabled = Boolean(addPanelChainIconsConfig?.spin);
+
+  // TRANSACTION_INFO_PANEL styling derivations (side-panel variant)
+  const txInfoPanelSidePanelConfig = TRANSACTION_INFO_PANEL_DISPLAY.sidePanel;
+  const txInfoPanelWidth = txInfoPanelSidePanelConfig.width;
+  const txInfoPanelPaddingLeft = txInfoPanelSidePanelConfig.paddingLeft;
+  const txInfoPanelPaddingRight = txInfoPanelSidePanelConfig.paddingRight;
+  const txInfoPanelPaddingTop = txInfoPanelSidePanelConfig.paddingTop;
+  const txInfoPanelPaddingBottom = txInfoPanelSidePanelConfig.paddingBottom;
+  const txInfoPanelCloseConfig = txInfoPanelSidePanelConfig.x;
+  const txInfoPanelClosePaddingTop = txInfoPanelCloseConfig.paddingTop;
+  const txInfoPanelClosePaddingRight = txInfoPanelCloseConfig.paddingRight;
+  const txInfoPanelCloseSize = txInfoPanelCloseConfig.size;
+  const txInfoPanelCloseFontFamily = txInfoPanelCloseConfig.fontName;
+  const txInfoPanelArrowConfig = txInfoPanelSidePanelConfig.arrow;
+  const txInfoPanelArrowColor = txInfoPanelArrowConfig.color;
+  const txInfoPanelArrowFontSize = txInfoPanelArrowConfig.fontSize;
+  const txInfoPanelArrowFontFamily = txInfoPanelArrowConfig.fontName;
+  const txInfoPanelDisplayLocation = (TRANSACTION_INFO_PANEL_DISPLAY as { displayLocation?: { sidePanel?: unknown; inChat?: unknown } }).displayLocation;
+  const txInfoPanelShowInSidePanel = Boolean(txInfoPanelDisplayLocation?.sidePanel);
+  const txInfoPanelStatusTextConfig = (txInfoPanelSidePanelConfig as { statusText?: Record<string, unknown> }).statusText ?? {};
+  const txInfoPanelStatusExecutingLabel = typeof txInfoPanelStatusTextConfig.executingLabel === 'string' ? txInfoPanelStatusTextConfig.executingLabel : 'Executing';
+  const txInfoPanelStatusExecutedLabel = typeof txInfoPanelStatusTextConfig.executedLabel === 'string' ? txInfoPanelStatusTextConfig.executedLabel : 'Executed';
+  const txInfoPanelStatusFontSize = typeof txInfoPanelStatusTextConfig.fontSize === 'number' ? txInfoPanelStatusTextConfig.fontSize : 12;
+  const txInfoPanelStatusFontFamily = typeof txInfoPanelStatusTextConfig.fontName === 'string' ? txInfoPanelStatusTextConfig.fontName : 'sans-serif';
+  const txInfoPanelStatusExecutingFontStyle = typeof txInfoPanelStatusTextConfig.executingFontStyle === 'string' ? txInfoPanelStatusTextConfig.executingFontStyle : 'italic';
+  const txInfoPanelStatusExecutedFontStyle = typeof txInfoPanelStatusTextConfig.executedFontStyle === 'string' ? txInfoPanelStatusTextConfig.executedFontStyle : 'normal';
+  const txInfoPanelStatusExecutingColor = typeof txInfoPanelStatusTextConfig.executingColor === 'string' ? txInfoPanelStatusTextConfig.executingColor : '#9ca3af';
+  const txInfoPanelStatusExecutedColor = typeof txInfoPanelStatusTextConfig.executedColor === 'string' ? txInfoPanelStatusTextConfig.executedColor : '#d1d5db';
+  const txInfoPanelStatusPaddingBottom = typeof txInfoPanelStatusTextConfig.paddingBottom === 'number' ? txInfoPanelStatusTextConfig.paddingBottom : 2;
+  const txInfoPanelViewTxConfig = (txInfoPanelSidePanelConfig as { viewTransaction?: Record<string, unknown> }).viewTransaction ?? {};
+  const txInfoPanelViewTxLabel = typeof txInfoPanelViewTxConfig.label === 'string' ? txInfoPanelViewTxConfig.label : 'View Transaction';
+  const txInfoPanelViewTxFontSize = typeof txInfoPanelViewTxConfig.fontSize === 'number' ? txInfoPanelViewTxConfig.fontSize : 11;
+  const txInfoPanelViewTxFontFamily = typeof txInfoPanelViewTxConfig.fontName === 'string' ? txInfoPanelViewTxConfig.fontName : 'sans-serif';
+  const txInfoPanelViewTxColor = typeof txInfoPanelViewTxConfig.color === 'string' ? txInfoPanelViewTxConfig.color : '#60a5fa';
+  const txInfoPanelViewTxHighlightColor = typeof txInfoPanelViewTxConfig.highlightColor === 'string' ? txInfoPanelViewTxConfig.highlightColor : '#93c5fd';
+  const txInfoPanelViewTxPaddingTop = typeof txInfoPanelViewTxConfig.paddingTop === 'number' ? txInfoPanelViewTxConfig.paddingTop : 2;
+  const txInfoPanelViewTxUnderline = Boolean(txInfoPanelViewTxConfig.underline);
+  const resolveTransactionExplorerUrl = (chainKey: ChainKey, txHash: string): string | null => {
+    if (!txHash) return null;
+    if (chainKey === 'SOLANA_DEVNET') return `https://solscan.io/tx/${txHash}?cluster=devnet`;
+    const explorerBase = (
+      chainKey === 'SOLANA_MAINNET' ? SOLANA_MAINNET.explorerUrl
+      : chainKey === 'ETH_MAINNET' ? ETH_MAINNET.explorerUrl
+      : chainKey === 'ETH_SEPOLIA' ? ETH_SEPOLIA.explorerUrl
+      : chainKey === 'BASE_MAINNET' ? BASE_MAINNET.explorerUrl
+      : chainKey === 'BASE_SEPOLIA' ? BASE_SEPOLIA.explorerUrl
+      : null
+    );
+    if (!explorerBase) return null;
+    const trimmed = explorerBase.replace(/\/+$/, '');
+    return `${trimmed}/tx/${txHash}`;
+  };
+  const resolveAlignItems = (value: string | undefined, fallback: 'flex-start' | 'center' | 'flex-end'): string => {
+    const normalized = (value ?? '').toString().trim().toLowerCase();
+    if (normalized === 'left' || normalized === 'flex-start' || normalized === 'start') return 'flex-start';
+    if (normalized === 'center' || normalized === 'centre') return 'center';
+    if (normalized === 'right' || normalized === 'flex-end' || normalized === 'end') return 'flex-end';
+    return fallback;
+  };
+  const txInfoPanelLeftAlignItems = resolveAlignItems(
+    (txInfoPanelSidePanelConfig as { leftSection?: { alignItems?: string } }).leftSection?.alignItems,
+    'flex-start'
+  );
+  const txInfoPanelRightAlignItems = resolveAlignItems(
+    (txInfoPanelSidePanelConfig as { rightSection?: { alignItems?: string } }).rightSection?.alignItems,
+    'flex-end'
+  );
+  const txInfoPanelChainNameConfig = txInfoPanelSidePanelConfig.chainName;
+  const txInfoPanelChainNameFontSize = txInfoPanelChainNameConfig.fontSize;
+  const txInfoPanelChainNameFontFamily = txInfoPanelChainNameConfig.fontName;
+  const txInfoPanelChainNameColor = txInfoPanelChainNameConfig.color;
+  const txInfoPanelChainNameAllCaps = Boolean(txInfoPanelChainNameConfig.allCaps);
+  const txInfoPanelChainNameLetterSpacing = txInfoPanelChainNameConfig.letterSpacing ?? '0';
+  const txInfoPanelChainNamePaddingBottom = txInfoPanelChainNameConfig.paddingBottom;
+  const txInfoPanelTokenSymbolConfig = txInfoPanelSidePanelConfig.tokenSymbol;
+  const txInfoPanelTokenSymbolFontSize = txInfoPanelTokenSymbolConfig.fontSize;
+  const txInfoPanelTokenSymbolFontFamily = txInfoPanelTokenSymbolConfig.fontName;
+  const txInfoPanelTokenSymbolColor = txInfoPanelTokenSymbolConfig.color;
+  const txInfoPanelTokenSymbolPaddingTop = txInfoPanelTokenSymbolConfig.paddingTop;
+  const txInfoPanelTokenAmountConfig = txInfoPanelSidePanelConfig.tokenAmount;
+  const txInfoPanelTokenAmountFontSize = txInfoPanelTokenAmountConfig.fontSize;
+  const txInfoPanelTokenAmountFontFamily = txInfoPanelTokenAmountConfig.fontName;
+  const txInfoPanelTokenAmountColor = txInfoPanelTokenAmountConfig.color;
+  const txInfoPanelTokenAmountDecimals = txInfoPanelTokenAmountConfig.decimals;
+  const txInfoPanelTokenAmountPaddingTop = txInfoPanelTokenAmountConfig.paddingTop;
+  const txInfoPanelPendingConfig = txInfoPanelSidePanelConfig.pendingText;
+  const txInfoPanelPendingLabel = txInfoPanelPendingConfig.label;
+  const txInfoPanelPendingFontStyle = txInfoPanelPendingConfig.fontStyle;
+  const txInfoPanelPendingColor = txInfoPanelPendingConfig.color;
+  const txInfoPanelTokenIconsConfig = txInfoPanelSidePanelConfig.tokenIcons;
+  const txInfoPanelTokenIconSize = Number(txInfoPanelTokenIconsConfig.size);
+  const txInfoPanelTokenIconFileType = typeof txInfoPanelTokenIconsConfig.fileType === 'string' ? txInfoPanelTokenIconsConfig.fileType : 'webp';
+  const txInfoPanelTokenIconFileSize = typeof txInfoPanelTokenIconsConfig.fileSize === 'string' ? txInfoPanelTokenIconsConfig.fileSize : '64px';
+  const txInfoPanelTokenIconBorderPosition = typeof txInfoPanelTokenIconsConfig.borderPosition === 'string' ? txInfoPanelTokenIconsConfig.borderPosition : 'inner';
+  const txInfoPanelTokenIconBorderColor = typeof txInfoPanelTokenIconsConfig.borderColor === 'string' ? txInfoPanelTokenIconsConfig.borderColor : null;
+  const txInfoPanelTokenIconBorderWidth = typeof txInfoPanelTokenIconsConfig.borderWidth === 'number' ? txInfoPanelTokenIconsConfig.borderWidth : null;
+  const txInfoPanelTokenIconPlaceholderColor = typeof txInfoPanelTokenIconsConfig.placeholderColor === 'string' ? txInfoPanelTokenIconsConfig.placeholderColor : '#1F2937';
+  const txInfoPanelTokenIconPlaceholderFontColor = typeof txInfoPanelTokenIconsConfig.placeholderFontColor === 'string' ? txInfoPanelTokenIconsConfig.placeholderFontColor : '#d1d5db';
+  const txInfoPanelTokenIconPlaceholderFontSize = typeof txInfoPanelTokenIconsConfig.placeholderFontSize === 'number' ? txInfoPanelTokenIconsConfig.placeholderFontSize : 18;
+  const txInfoPanelTokenIconSpinEnabled = Boolean(txInfoPanelTokenIconsConfig.spin);
+  const resolveTransactionPanelChainLabel = (chainKey: ChainKey): string => {
+    const config = (CHAIN_OPTIONS as Record<string, unknown>)[chainKey] as { transactionPanel?: { sidePanel?: string; inChat?: string } } | undefined;
+    return config?.transactionPanel?.sidePanel ?? String(chainKey);
+  };
+  const formatTransactionInfoAmount = (value: string): string => {
+    if (!value) return '0';
+    const num = Number(value);
+    if (!Number.isFinite(num)) return value;
+    return num.toFixed(txInfoPanelTokenAmountDecimals).replace(/\.?0+$/, '') || '0';
+  };
+
   const formatDisplayAddress = (address: string) => {
     if (!address) return '—';
     const isEvm = address.startsWith('0x');
@@ -1274,6 +1392,151 @@ export default function UserMenu() {
       }
     };
   }, [authenticated, selectedChain, wallets, solanaWallets, activeNetworkOptions]);
+
+  // TRANSACTION_INFO_PANEL: create on swap-submitted, update on swap-complete.
+  const addTransactionInfoPanelRef = useRef(addTransactionInfoPanel);
+  const updateTransactionInfoPanelRef = useRef(updateTransactionInfoPanel);
+  addTransactionInfoPanelRef.current = addTransactionInfoPanel;
+  updateTransactionInfoPanelRef.current = updateTransactionInfoPanel;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const toRawString = (token: { balance?: string; balanceRaw?: string; decimals?: number } | undefined): {
+      raw: string | null;
+      decimals: number | null;
+    } => {
+      if (!token) return { raw: null, decimals: null };
+      const decimals = typeof token.decimals === 'number' ? token.decimals : null;
+      if (typeof token.balanceRaw === 'string' && token.balanceRaw.length > 0) {
+        return { raw: token.balanceRaw, decimals };
+      }
+      if (typeof token.balance === 'string' && token.balance.length > 0 && decimals !== null) {
+        const num = Number(token.balance);
+        if (Number.isFinite(num) && num >= 0) {
+          try {
+            const whole = Math.floor(num);
+            const fraction = num - whole;
+            const scale = 10 ** decimals;
+            const raw = BigInt(whole) * BigInt(scale) + BigInt(Math.round(fraction * scale));
+            return { raw: raw.toString(), decimals };
+          } catch {
+            return { raw: null, decimals };
+          }
+        }
+      }
+      return { raw: null, decimals };
+    };
+
+    const rawDeltaToHuman = (afterRaw: string, beforeRaw: string | null, decimals: number): string => {
+      try {
+        const after = BigInt(afterRaw);
+        const before = beforeRaw ? BigInt(beforeRaw) : 0n;
+        const diff = after - before;
+        const sign = diff < 0n ? '-' : '';
+        const abs = diff < 0n ? -diff : diff;
+        const base = 10n ** BigInt(decimals);
+        const whole = abs / base;
+        const fraction = abs % base;
+        if (fraction === 0n) return `${sign}${whole.toString()}`;
+        const padded = fraction.toString().padStart(decimals, '0').replace(/0+$/, '');
+        return `${sign}${whole.toString()}.${padded}`;
+      } catch {
+        return '0';
+      }
+    };
+
+    const handleSwapSubmittedForPanel = (event: Event) => {
+      const detail = (event as CustomEvent).detail as {
+        sellToken?: string;
+        buyToken?: string;
+        sellChain?: ChainKey;
+        buyChain?: ChainKey;
+        amount?: string;
+        txHash?: string;
+        requestId?: string;
+      } | undefined;
+      if (!detail) return;
+      const sellChain = detail.sellChain;
+      const buyChain = detail.buyChain;
+      const sellToken = (detail.sellToken ?? '').toUpperCase();
+      const buyToken = (detail.buyToken ?? '').toUpperCase();
+      if (!sellChain || !buyChain || !sellToken || !buyToken) return;
+
+      const buyTokenSnapshot = balancesByChainRef.current?.[buyChain]?.tokens?.[buyToken];
+      const { raw: buyBalanceBeforeRaw, decimals: buyTokenDecimals } = toRawString(buyTokenSnapshot);
+      const txKey = detail.txHash ?? detail.requestId ?? null;
+
+      addTransactionInfoPanelRef.current({
+        txKey,
+        txHash: detail.txHash ?? null,
+        sellChain,
+        buyChain,
+        sellToken,
+        buyToken,
+        sellAmount: detail.amount ?? '',
+        buyAmount: null,
+        buyBalanceBeforeRaw,
+        buyTokenDecimals,
+        status: 'pending',
+      });
+    };
+
+    const handleSwapCompleteForPanel = (event: Event) => {
+      const detail = (event as CustomEvent).detail as {
+        chain?: ChainKey;
+        sellToken?: string;
+        buyToken?: string;
+        txHash?: string;
+        requestId?: string;
+        balanceUpdates?: Array<{
+          chain: ChainKey;
+          symbol: string;
+          balanceAfterRaw: string | null;
+          decimals: number;
+        }>;
+      } | undefined;
+      if (!detail) return;
+      const sellToken = (detail.sellToken ?? '').toUpperCase();
+      const buyToken = (detail.buyToken ?? '').toUpperCase();
+      const sellChainFromDetail = detail.chain;
+      const txKey = detail.txHash ?? detail.requestId ?? null;
+
+      updateTransactionInfoPanelRef.current(
+        (panel) => {
+          if (panel.status !== 'pending') return false;
+          if (txKey && panel.txKey && panel.txKey === txKey) return true;
+          if (panel.sellToken !== sellToken) return false;
+          if (panel.buyToken !== buyToken) return false;
+          if (sellChainFromDetail && panel.sellChain !== sellChainFromDetail) return false;
+          return true;
+        },
+        (panel) => {
+          const buyEntry = (detail.balanceUpdates ?? []).find(
+            (entry) =>
+              (entry.symbol ?? '').toUpperCase() === panel.buyToken &&
+              (entry.chain === panel.buyChain)
+          );
+          if (buyEntry?.balanceAfterRaw) {
+            const decimals = panel.buyTokenDecimals ?? buyEntry.decimals ?? 0;
+            return {
+              status: 'complete' as const,
+              buyAmount: rawDeltaToHuman(buyEntry.balanceAfterRaw, panel.buyBalanceBeforeRaw, decimals),
+              buyTokenDecimals: decimals,
+            };
+          }
+          return { status: 'complete' as const };
+        }
+      );
+    };
+
+    window.addEventListener('altair:swap-submitted', handleSwapSubmittedForPanel);
+    window.addEventListener('altair:swap-complete', handleSwapCompleteForPanel);
+    return () => {
+      window.removeEventListener('altair:swap-submitted', handleSwapSubmittedForPanel);
+      window.removeEventListener('altair:swap-complete', handleSwapCompleteForPanel);
+    };
+  }, []);
 
   useEffect(() => {
     if (!activeNetworkOptions.some((option) => option.key === selectedChain)) {
@@ -2130,6 +2393,79 @@ export default function UserMenu() {
     />
   );
 
+  const resolveTxPanelTokenIconSrc = (symbol: string): string | null => {
+    if (!symbol || !txInfoPanelTokenIconFileType || !txInfoPanelTokenIconFileSize) return null;
+    return `/image/tokens/${txInfoPanelTokenIconFileType}/${txInfoPanelTokenIconFileSize}/${symbol}.${txInfoPanelTokenIconFileType}`;
+  };
+
+  const renderTransactionInfoPanel = (panel: import('../lib/usePanels').TransactionInfoPanelState) => (
+    <TransactionInfoPanel
+      panel={panel}
+      panelType="transaction-sidepanel"
+      width={txInfoPanelWidth}
+      paddingLeft={txInfoPanelPaddingLeft}
+      paddingRight={txInfoPanelPaddingRight}
+      paddingTop={txInfoPanelPaddingTop}
+      paddingBottom={txInfoPanelPaddingBottom}
+      closePaddingTop={txInfoPanelClosePaddingTop}
+      closePaddingRight={txInfoPanelClosePaddingRight}
+      closeSize={txInfoPanelCloseSize}
+      closeFontFamily={txInfoPanelCloseFontFamily}
+      arrowColor={txInfoPanelArrowColor}
+      arrowFontSize={txInfoPanelArrowFontSize}
+      arrowFontFamily={txInfoPanelArrowFontFamily}
+      leftAlignItems={txInfoPanelLeftAlignItems}
+      rightAlignItems={txInfoPanelRightAlignItems}
+      statusExecutingLabel={txInfoPanelStatusExecutingLabel}
+      statusExecutedLabel={txInfoPanelStatusExecutedLabel}
+      statusFontSize={txInfoPanelStatusFontSize}
+      statusFontFamily={txInfoPanelStatusFontFamily}
+      statusExecutingFontStyle={txInfoPanelStatusExecutingFontStyle}
+      statusExecutedFontStyle={txInfoPanelStatusExecutedFontStyle}
+      statusExecutingColor={txInfoPanelStatusExecutingColor}
+      statusExecutedColor={txInfoPanelStatusExecutedColor}
+      statusPaddingBottom={txInfoPanelStatusPaddingBottom}
+      viewTransactionLabel={txInfoPanelViewTxLabel}
+      viewTransactionFontSize={txInfoPanelViewTxFontSize}
+      viewTransactionFontFamily={txInfoPanelViewTxFontFamily}
+      viewTransactionColor={txInfoPanelViewTxColor}
+      viewTransactionHighlightColor={txInfoPanelViewTxHighlightColor}
+      viewTransactionPaddingTop={txInfoPanelViewTxPaddingTop}
+      viewTransactionUnderline={txInfoPanelViewTxUnderline}
+      resolveTransactionUrl={resolveTransactionExplorerUrl}
+      chainNameFontSize={txInfoPanelChainNameFontSize}
+      chainNameFontFamily={txInfoPanelChainNameFontFamily}
+      chainNameColor={txInfoPanelChainNameColor}
+      chainNameAllCaps={txInfoPanelChainNameAllCaps}
+      chainNameLetterSpacing={txInfoPanelChainNameLetterSpacing}
+      chainNamePaddingBottom={txInfoPanelChainNamePaddingBottom}
+      tokenSymbolFontSize={txInfoPanelTokenSymbolFontSize}
+      tokenSymbolFontFamily={txInfoPanelTokenSymbolFontFamily}
+      tokenSymbolColor={txInfoPanelTokenSymbolColor}
+      tokenSymbolPaddingTop={txInfoPanelTokenSymbolPaddingTop}
+      tokenAmountFontSize={txInfoPanelTokenAmountFontSize}
+      tokenAmountFontFamily={txInfoPanelTokenAmountFontFamily}
+      tokenAmountColor={txInfoPanelTokenAmountColor}
+      tokenAmountDecimals={txInfoPanelTokenAmountDecimals}
+      tokenAmountPaddingTop={txInfoPanelTokenAmountPaddingTop}
+      pendingLabel={txInfoPanelPendingLabel}
+      pendingFontStyle={txInfoPanelPendingFontStyle}
+      pendingColor={txInfoPanelPendingColor}
+      tokenIconSize={txInfoPanelTokenIconSize}
+      tokenIconBorderPosition={txInfoPanelTokenIconBorderPosition}
+      tokenIconBorderColor={txInfoPanelTokenIconBorderColor}
+      tokenIconBorderWidth={txInfoPanelTokenIconBorderWidth}
+      tokenIconPlaceholderColor={txInfoPanelTokenIconPlaceholderColor}
+      tokenIconPlaceholderFontColor={txInfoPanelTokenIconPlaceholderFontColor}
+      tokenIconPlaceholderFontSize={txInfoPanelTokenIconPlaceholderFontSize}
+      tokenIconSpinEnabled={txInfoPanelTokenIconSpinEnabled}
+      resolveTokenIconSrc={resolveTxPanelTokenIconSrc}
+      resolveChainLabel={resolveTransactionPanelChainLabel}
+      formatAmount={formatTransactionInfoAmount}
+      onClose={() => closeTransactionInfoPanel(panel.id)}
+    />
+  );
+
   if (!authenticated) return null;
 
   return (
@@ -2730,14 +3066,19 @@ export default function UserMenu() {
         )}
       </div>
 
-      {isWalletPanel && isWalletPanelOpen && (
+      {isWalletPanel && (isWalletPanelOpen || (txInfoPanelShowInSidePanel && transactionInfoPanels.length > 0)) && (
         <div className="absolute right-0 top-full mt-3 z-[90] flex flex-col gap-3">
-          {walletPanels.map((panel) => (
+          {isWalletPanelOpen && walletPanels.map((panel) => (
             <React.Fragment key={panel.id}>
               {renderWalletPanel(panel)}
             </React.Fragment>
           ))}
-          {isAddPanelOpen ? renderAddPanel() : null}
+          {txInfoPanelShowInSidePanel && transactionInfoPanels.map((panel) => (
+            <React.Fragment key={`tx-${panel.id}`}>
+              {renderTransactionInfoPanel(panel)}
+            </React.Fragment>
+          ))}
+          {isWalletPanelOpen && isAddPanelOpen ? renderAddPanel() : null}
         </div>
       )}
 

@@ -135,6 +135,7 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
     },
   },
   x: { // Wallet panel close “×” placement and sizing in UserMenu.tsx
+    ENABLED: true,
     paddingTop: 0, // Close top offset in UserMenu.tsx
     paddingRight: 6, // Close right offset in UserMenu.tsx
     size: 23, // Close icon size in UserMenu.tsx
@@ -243,7 +244,11 @@ export const CHAIN_OPTIONS = {
     walletDisplay: { // Refers to the chain dropdown that appears at the top of wallet UIs such as WALLET_PANELs and the WALLET_DROPDOWN
       dropdownLabel: 'Ethereum', // How this chain appears in the dropdown
       selectedLabel: 'Ethereum Wallet', // How this chain appears on the button after being selected
-    }
+    },
+    transactionPanel: {
+      inChat: 'Ethereum',
+      sidePanel: 'Ethereum',
+    },
   },
 
   // Ethereum Sepolia Testnet
@@ -257,7 +262,11 @@ export const CHAIN_OPTIONS = {
     walletDisplay: {
       dropdownLabel: 'Ethereum Testnet',
       selectedLabel: 'Ethereum Testnet',
-    }
+    },
+    transactionPanel: {
+      inChat: 'Ethereum Testnet',
+      sidePanel: 'Ethereum Testnet',
+    },
   },
 
   // Base
@@ -271,7 +280,11 @@ export const CHAIN_OPTIONS = {
     walletDisplay: {
       dropdownLabel: 'Base',
       selectedLabel: 'Base Wallet',
-    }
+    },
+    transactionPanel: {
+      inChat: 'Base',
+      sidePanel: 'Base',
+    },
   },
 
   // Base Sepolia Testnet
@@ -285,7 +298,11 @@ export const CHAIN_OPTIONS = {
     walletDisplay: {
       dropdownLabel: 'Base Testnet',
       selectedLabel: 'Base Testnet',
-    }
+    },
+    transactionPanel: {
+      inChat: 'Base Testnet',
+      sidePanel: 'Base Testnet',
+    },
   },
 
   // Solana
@@ -299,7 +316,11 @@ export const CHAIN_OPTIONS = {
     walletDisplay: {
       dropdownLabel: 'Solana',
       selectedLabel: 'Solana Wallet',
-    }
+    },
+    transactionPanel: {
+      inChat: 'Solana',
+      sidePanel: 'Solana',
+    },
   },
 
   // Solana Devnet
@@ -313,7 +334,11 @@ export const CHAIN_OPTIONS = {
     walletDisplay: {
       dropdownLabel: 'Solana Devnet',
       selectedLabel: 'Solana Devnet',
-    }
+    },
+    transactionPanel: {
+      inChat: 'Solana Devnet',
+      sidePanel: 'Solana Devnet',
+    },
   },
 
   // All Chains
@@ -353,6 +378,7 @@ export const ADD_PANEL_DISPLAY = { // ADD_PANEL sizing, label, and icon styles i
     paddingBottom: 5, // ADD_PANEL icon row bottom padding in UserMenu.tsx
   },
   x: { // ADD_PANEL close “×” placement and sizing in UserMenu.tsx
+    ENABLED: true,
     paddingTop: 0, // Close top offset in UserMenu.tsx
     paddingRight: 6, // Close right offset in UserMenu.tsx
     size: 23, // Close icon size in UserMenu.tsx
@@ -381,6 +407,181 @@ export const ADD_PANEL_DISPLAY = { // ADD_PANEL sizing, label, and icon styles i
     placeholderFontSize: 14,
     spin: true,
   },
+};
+
+export const TRANSACTION_INFO_PANEL_DISPLAY = { // TRANSACTION_INFO_PANEL sizing, typography, and icon styles in UserMenu.tsx
+  displayLocation: {
+    sidePanel: false,
+    inChat: true
+  },
+  sidePanel: {
+    logo: true,
+    width: 270, // Panel width (rectangle wider than tall) in UserMenu.tsx
+    paddingLeft: 23, // Panel content left padding in UserMenu.tsx
+    paddingRight: 23, // Panel content right padding in UserMenu.tsx
+    paddingTop: 5, // Panel content top padding in UserMenu.tsx
+    paddingBottom: 5, // Panel content bottom padding in UserMenu.tsx
+    arrow: { // Center arrow separating sell side from buy side
+      color: '#9ca3af',
+      fontSize: 28,
+      fontName: 'sans-serif',
+    },
+    statusText: { // "Executing"/"Executed" label rendered above the arrow
+      executingLabel: 'Executing',
+      executedLabel: 'Executed!',
+      fontSize: 12,
+      fontName: 'sans-serif',
+      executingFontStyle: 'italic',
+      executedFontStyle: 'italic',
+      executingColor: '#9ca3af',
+      executedColor: '#9ca3af',
+      paddingBottom: 0,
+    },
+    viewTransaction: { // "View Transaction" link rendered below the arrow after execution
+      label: 'View Transaction',
+      fontSize: 11,
+      fontName: 'sans-serif',
+      color: '#60a5fa',
+      highlightColor: '#93c5fd',
+      paddingTop: 2,
+      underline: true,
+    },
+    leftSection: {
+      alignItems: 'center',
+    },
+    rightSection: {
+      alignItems: 'center',
+    },
+    chainName: { // Chain name shown above each token icon (sourced from CHAIN_OPTIONS[key].transactionPanel.sidePanel)
+      fontSize: 11,
+      fontName: 'monospace',
+      color: '#9ca3af',
+      allCaps: true,
+      letterSpacing: '0.15em',
+      paddingBottom: 4,
+    },
+    tokenSymbol: { // Token symbol shown below the token icon
+      fontSize: 13,
+      fontName: 'sans-serif',
+      color: '#d1d5db',
+      paddingTop: 4,
+    },
+    tokenAmount: { // Token amount shown below the token symbol
+      fontSize: 14,
+      fontName: 'sans-serif',
+      color: '#f3f4f6',
+      decimals: 6,
+      paddingTop: 0,
+    },
+    pendingText: { // Italic "Pending" string shown for the buy amount while the swap is in flight
+      label: 'Pending',
+      fontStyle: 'italic',
+      color: '#9ca3af',
+    },
+    tokenIcons: {
+      fileType: 'webp',
+      fileSize: '64px',
+      size: 42,
+      borderPosition: 'inner',
+      borderColor: null,
+      borderWidth: null,
+      placeholderColor: '#1F2937',
+      placeholderFontColor: '#d1d5db',
+      placeholderFontSize: 18,
+      spin: true,
+    },
+    x: { // Close "×" placement and sizing
+      ENABLED: true,
+      paddingTop: 0,
+      paddingRight: 6,
+      size: 23,
+      fontName: 'sans-serif',
+    },
+  },
+  inChat: {
+    logo: false,
+    width: 270, // Panel width (rectangle wider than tall) in UserMenu.tsx
+    paddingLeft: 23, // Panel content left padding in UserMenu.tsx
+    paddingRight: 23, // Panel content right padding in UserMenu.tsx
+    paddingTop: 5, // Panel content top padding in UserMenu.tsx
+    paddingBottom: 5, // Panel content bottom padding in UserMenu.tsx
+    arrow: { // Center arrow separating sell side from buy side
+      color: '#9ca3af',
+      fontSize: 28,
+      fontName: 'sans-serif',
+    },
+    statusText: { // "Executing"/"Executed" label rendered above the arrow
+      executingLabel: 'Executing',
+      executedLabel: 'Executed!',
+      fontSize: 12,
+      fontName: 'sans-serif',
+      executingFontStyle: 'italic',
+      executedFontStyle: 'italic',
+      executingColor: '#9ca3af',
+      executedColor: '#9ca3af',
+      paddingBottom: 0,
+    },
+    viewTransaction: { // "View Transaction" link rendered below the arrow after execution
+      label: 'View Transaction',
+      fontSize: 11,
+      fontName: 'sans-serif',
+      color: '#60a5fa',
+      highlightColor: '#93c5fd',
+      paddingTop: 2,
+      underline: true,
+    },
+    leftSection: {
+      alignItems: 'center',
+    },
+    rightSection: {
+      alignItems: 'center',
+    },
+    chainName: { // Chain name shown above each token icon (sourced from CHAIN_OPTIONS[key].transactionPanel.sidePanel)
+      fontSize: 11,
+      fontName: 'monospace',
+      color: '#9ca3af',
+      allCaps: true,
+      letterSpacing: '0.15em',
+      paddingBottom: 4,
+    },
+    tokenSymbol: { // Token symbol shown below the token icon
+      fontSize: 13,
+      fontName: 'sans-serif',
+      color: '#d1d5db',
+      paddingTop: 4,
+    },
+    tokenAmount: { // Token amount shown below the token symbol
+      fontSize: 14,
+      fontName: 'sans-serif',
+      color: '#f3f4f6',
+      decimals: 6,
+      paddingTop: 0,
+    },
+    pendingText: { // Italic "Pending" string shown for the buy amount while the swap is in flight
+      label: 'Pending',
+      fontStyle: 'italic',
+      color: '#9ca3af',
+    },
+    tokenIcons: {
+      fileType: 'webp',
+      fileSize: '64px',
+      size: 42,
+      borderPosition: 'inner',
+      borderColor: null,
+      borderWidth: null,
+      placeholderColor: '#1F2937',
+      placeholderFontColor: '#d1d5db',
+      placeholderFontSize: 18,
+      spin: true,
+    },
+    x: { // Close "×" placement and sizing
+      ENABLED: false,
+      paddingTop: 0,
+      paddingRight: 6,
+      size: 23,
+      fontName: 'sans-serif',
+    },
+  }
 };
 
 export const MENU_ICONS = { // Top-right menu icon styling in UserMenu.tsx
