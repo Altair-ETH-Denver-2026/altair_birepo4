@@ -12,7 +12,7 @@ import { useSwap } from '../lib/useSwap';
 import { useSolanaSwap } from '../lib/useSolanaSwap';
 import { useRelay } from '../lib/useRelay';
 import { getCachedPrivyAccessToken } from '../lib/privyTokenCache';
-import { dispatchSwapInitiated } from '../lib/eventTypes';
+import { dispatchSwapInitiated, dispatchSwapConfirmed } from '../lib/eventTypes';
 import { BLOCKCHAIN, CHAINS, type ChainKey } from '../../config/blockchain_config';
 import * as SolanaTokens from '../../config/token_info/solana_tokens';
 import { CHAT_PANEL, CHAIN_OPTIONS, TRANSACTION_INFO_PANEL_DISPLAY } from '../../config/ui_config';
@@ -187,6 +187,45 @@ export default function Chat() {
     if (sellChain && sellChain in CHAINS) return sellChain as ChainKey;
     if (buyChain && buyChain in CHAINS) return buyChain as ChainKey;
     return resolveSelectedChain();
+  };
+
+  const deriveConfirmedSwapMeta = (
+    intent: ExecutableSwapIntent
+  ): {
+    sellToken: string;
+    buyToken: string;
+    sellChain: ChainKey;
+    buyChain: ChainKey;
+    amount: string;
+    intentType: 'SINGLE_CHAIN_SWAP_INTENT' | 'CROSS_CHAIN_SWAP_INTENT' | 'BRIDGE_INTENT';
+  } | null => {
+    const sell = intent.sell?.toUpperCase();
+    const buy = intent.buy?.toUpperCase();
+    if (!sell || !buy) return null;
+    const amount = typeof intent.amount === 'number' ? intent.amount.toString() : intent.amount;
+    if (!amount) return null;
+    let sellChain: ChainKey;
+    let buyChain: ChainKey;
+    if (intent.type === 'CROSS_CHAIN_SWAP_INTENT' || intent.type === 'BRIDGE_INTENT') {
+      if (!intent.sellTokenChain || !intent.buyTokenChain) return null;
+      if (!(intent.sellTokenChain in CHAINS) || !(intent.buyTokenChain in CHAINS)) return null;
+      sellChain = intent.sellTokenChain as ChainKey;
+      buyChain = intent.buyTokenChain as ChainKey;
+    } else {
+      const single = resolveIntentChain(intent);
+      sellChain = single;
+      buyChain = single;
+    }
+    const normalizedSell = sellChain === 'SOLANA_MAINNET' && sell === 'ETH' ? 'SOL' : sell;
+    const normalizedBuy = buyChain === 'SOLANA_MAINNET' && buy === 'ETH' ? 'SOL' : buy;
+    return {
+      sellToken: normalizedSell,
+      buyToken: normalizedBuy,
+      sellChain,
+      buyChain,
+      amount,
+      intentType: intent.type,
+    };
   };
 
   const isConfirmationMessage = (text: string): boolean => {
@@ -527,6 +566,67 @@ export default function Chat() {
       }
     };
 
+    const writeSnapshotIfMissing = (sellToken: string, buyToken: string, sellChain: ChainKey, buyChain: ChainKey) => {
+      const snapshotKey = `${sellToken}:${buyToken}:${sellChain}`;
+      if (pendingSwapSnapshotsRef.current.has(snapshotKey)) {
+        return pendingSwapSnapshotsRef.current.get(snapshotKey)!;
+      }
+      const isSolana = buyChain === 'SOLANA_MAINNET' || buyChain === 'SOLANA_DEVNET';
+      const walletForChain = isSolana ? solanaWalletAddressRef.current : evmWalletAddressRef.current;
+      const snapshot = readCachedTokenSnapshot({
+        chainKey: buyChain,
+        walletAddress: walletForChain,
+        symbol: buyToken,
+      });
+      const entry = { buyBalanceBeforeRaw: snapshot.raw, buyTokenDecimals: snapshot.decimals };
+      pendingSwapSnapshotsRef.current.set(snapshotKey, entry);
+      return entry;
+    };
+
+    const handleSwapConfirmedInChat = (event: Event) => {
+      const detail = (event as CustomEvent).detail as {
+        sellToken?: string;
+        buyToken?: string;
+        sellChain?: ChainKey;
+        buyChain?: ChainKey;
+        amount?: string;
+      } | undefined;
+      if (!detail?.sellChain || !detail?.buyChain) return;
+      const sellChain = detail.sellChain;
+      const buyChain = detail.buyChain;
+      const sellToken = (detail.sellToken ?? '').toUpperCase();
+      const buyToken = (detail.buyToken ?? '').toUpperCase();
+      if (!sellToken || !buyToken) return;
+
+      const snapshotEntry = writeSnapshotIfMissing(sellToken, buyToken, sellChain, buyChain);
+      const nextId = txPanelIdRef.current + 1;
+      txPanelIdRef.current = nextId;
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: '',
+          displayContent: '',
+          isTyping: false,
+          transactionInfoPanel: {
+            id: nextId,
+            txKey: null,
+            txHash: null,
+            sellChain,
+            buyChain,
+            sellToken,
+            buyToken,
+            sellAmount: detail.amount ?? '',
+            buyAmount: null,
+            buyBalanceBeforeRaw: snapshotEntry.buyBalanceBeforeRaw,
+            buyTokenDecimals: snapshotEntry.buyTokenDecimals,
+            status: 'pending',
+          },
+        },
+      ]);
+    };
+
     const handleSwapSubmittedInChat = (event: Event) => {
       const detail = (event as CustomEvent).detail as {
         sellToken?: string;
@@ -543,46 +643,58 @@ export default function Chat() {
       const sellToken = (detail.sellToken ?? '').toUpperCase();
       const buyToken = (detail.buyToken ?? '').toUpperCase();
       if (!sellToken || !buyToken) return;
-
-      const isSolana = buyChain === 'SOLANA_MAINNET' || buyChain === 'SOLANA_DEVNET';
-      const walletForChain = isSolana ? solanaWalletAddressRef.current : evmWalletAddressRef.current;
-      const snapshot = readCachedTokenSnapshot({
-        chainKey: buyChain,
-        walletAddress: walletForChain,
-        symbol: buyToken,
-      });
-      const nextId = txPanelIdRef.current + 1;
-      txPanelIdRef.current = nextId;
       const txKey = detail.txHash ?? detail.requestId ?? null;
-      const snapshotKey = `${sellToken}:${buyToken}:${sellChain}`;
-      pendingSwapSnapshotsRef.current.set(snapshotKey, {
-        buyBalanceBeforeRaw: snapshot.raw,
-        buyTokenDecimals: snapshot.decimals,
-      });
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: '',
-          displayContent: '',
-          isTyping: false,
-          transactionInfoPanel: {
-            id: nextId,
-            txKey,
-            txHash: detail.txHash ?? null,
-            sellChain,
-            buyChain,
-            sellToken,
-            buyToken,
-            sellAmount: detail.amount ?? '',
-            buyAmount: null,
-            buyBalanceBeforeRaw: snapshot.raw,
-            buyTokenDecimals: snapshot.decimals,
-            status: 'pending',
+      setMessages((prev) => {
+        for (let i = prev.length - 1; i >= 0; i -= 1) {
+          const message = prev[i];
+          const panel = message.transactionInfoPanel;
+          if (!panel) continue;
+          if (panel.status !== 'pending') continue;
+          if (panel.txKey !== null) continue;
+          if (panel.sellToken !== sellToken) continue;
+          if (panel.buyToken !== buyToken) continue;
+          if (panel.sellChain !== sellChain) continue;
+          const next = prev.slice();
+          next[i] = {
+            ...message,
+            transactionInfoPanel: {
+              ...panel,
+              txKey,
+              txHash: detail.txHash ?? null,
+              sellAmount: detail.amount ?? panel.sellAmount,
+            },
+          };
+          return next;
+        }
+
+        const snapshotEntry = writeSnapshotIfMissing(sellToken, buyToken, sellChain, buyChain);
+        const nextId = txPanelIdRef.current + 1;
+        txPanelIdRef.current = nextId;
+        return [
+          ...prev,
+          {
+            role: 'assistant',
+            content: '',
+            displayContent: '',
+            isTyping: false,
+            transactionInfoPanel: {
+              id: nextId,
+              txKey,
+              txHash: detail.txHash ?? null,
+              sellChain,
+              buyChain,
+              sellToken,
+              buyToken,
+              sellAmount: detail.amount ?? '',
+              buyAmount: null,
+              buyBalanceBeforeRaw: snapshotEntry.buyBalanceBeforeRaw,
+              buyTokenDecimals: snapshotEntry.buyTokenDecimals,
+              status: 'pending',
+            },
           },
-        },
-      ]);
+        ];
+      });
     };
 
     const handleSwapCompleteInChat = (event: Event) => {
@@ -668,9 +780,11 @@ export default function Chat() {
       });
     };
 
+    window.addEventListener('altair:swap-confirmed', handleSwapConfirmedInChat);
     window.addEventListener('altair:swap-submitted', handleSwapSubmittedInChat);
     window.addEventListener('altair:swap-complete', handleSwapCompleteInChat);
     return () => {
+      window.removeEventListener('altair:swap-confirmed', handleSwapConfirmedInChat);
       window.removeEventListener('altair:swap-submitted', handleSwapSubmittedInChat);
       window.removeEventListener('altair:swap-complete', handleSwapCompleteInChat);
     };
@@ -1077,6 +1191,13 @@ export default function Chat() {
         if (button.action.actionId === 'CONFIRM_SWAP') {
           const intent = row.context?.intent as ExecutableSwapIntent | null | undefined;
           if (!intent) return;
+          const confirmedMeta = deriveConfirmedSwapMeta(intent);
+          if (confirmedMeta) {
+            dispatchSwapConfirmed({
+              ...confirmedMeta,
+              timestamp: Date.now(),
+            });
+          }
           const execution = await executeIntentNow(intent, row.context?.cid ?? null);
           if (execution) {
             const swapFollowupRow = buildChatButtonRowFromLogicTrigger({

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { ethers } from 'ethers';
 import { Connection, PublicKey, VersionedTransactionResponse } from '@solana/web3.js';
-import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '../../../../config/blockchain_config';
+import { BLOCKCHAIN, CHAINS, GAS_TOKENS, SWAP_PROVIDER_OPTIONS, type ChainKey } from '../../../../config/blockchain_config';
 import {
   BASE_MAINNET,
   BASE_SEPOLIA,
@@ -43,10 +43,29 @@ import {
   normalizeEvmAddress,
   searchAlchemyTokenAddressesBySymbol,
 } from '@/lib/alchemyTokens';
+import {
+  type SwapProvider,
+  type ProviderAttemptContext,
+  executeWithProviderFallback,
+  shouldFallbackToNextProvider,
+} from './provider-system';
 
 type TokenInfo = { address: string; decimals: number; symbol?: string };
 
 type JupiterTokenInfo = { address: string; decimals: number; symbol?: string };
+
+type ChainInfo = {
+  name: string;
+  isTestnet: boolean;
+  chainId: number;
+  rpcUrls: string[];
+  explorerUrl: string;
+  uniswapAddresses?: {
+    router: string;
+    factory: string;
+    swapRouter: string;
+  };
+};
 
 type ResolvedEvmToken = {
   address: string;
@@ -945,6 +964,357 @@ const applyTokenEnvOverrides = (chainKey: ChainKey, tokens: Record<string, Token
   }
   return out;
 };
+
+// ============================================================================
+// Provider-Specific Swap Functions
+// ============================================================================
+
+type ZeroXV1SwapParams = {
+  resolvedChainKey: ChainKey;
+  chainConfig: ChainInfo;
+  tokenConfig: Record<string, TokenInfo>;
+  normalizedSellToken: string;
+  normalizedBuyToken: string;
+  zeroXSellToken: string;
+  zeroXBuyToken: string;
+  sellAmountRaw: string;
+  recipient: string;
+  evmFeeRecipient: string | null;
+  evmAltairFeePct: number | null;
+  zeroXApiKey: string | null;
+  resolvedEvmSellToken: ResolvedEvmToken | null;
+  resolvedEvmBuyToken: ResolvedEvmToken | null;
+};
+
+type ZeroXV2SwapParams = {
+  resolvedChainKey: ChainKey;
+  chainConfig: ChainInfo;
+  tokenConfig: Record<string, TokenInfo>;
+  normalizedSellToken: string;
+  normalizedBuyToken: string;
+  zeroXV2SellToken: string;
+  zeroXV2BuyToken: string;
+  sellAmountRaw: string;
+  recipient: string;
+  evmFeeRecipient: string | null;
+  evmAltairFeePct: number | null;
+  zeroXApiKey: string | null;
+  resolvedEvmSellToken: ResolvedEvmToken | null;
+  resolvedEvmBuyToken: ResolvedEvmToken | null;
+};
+
+type ZeroXSwapResult = {
+  methodParameters: { to: string; calldata: string; value: string };
+  source: string;
+  chainRpcCandidates: string[];
+  sellTokenAddress?: string;
+  buyTokenAddress?: string;
+  providerFee?: { token: string; amount: string; decimals: number | null } | null;
+};
+
+/**
+ * Execute 0x v1 swap quote (testnets)
+ */
+async function execute0xV1Swap(params: ZeroXV1SwapParams): Promise<ZeroXSwapResult> {
+  const {
+    resolvedChainKey,
+    chainConfig,
+    tokenConfig,
+    normalizedSellToken,
+    normalizedBuyToken,
+    zeroXSellToken,
+    zeroXBuyToken,
+    sellAmountRaw,
+    recipient,
+    evmFeeRecipient,
+    evmAltairFeePct,
+    zeroXApiKey,
+    resolvedEvmSellToken,
+    resolvedEvmBuyToken,
+  } = params;
+
+  const v1Endpoints: Partial<Record<ChainKey, string>> = {
+    ETH_SEPOLIA: 'https://sepolia.api.0x.org/swap/v1/quote',
+    BASE_SEPOLIA: 'https://base-sepolia.api.0x.org/swap/v1/quote',
+    ETH_MAINNET: 'https://api.0x.org/swap/v1/quote',
+    BASE_MAINNET: 'https://base.api.0x.org/swap/v1/quote',
+  };
+
+  const v1Endpoint = v1Endpoints[resolvedChainKey];
+  if (!v1Endpoint) {
+    throw new Error(`0x v1 not available for chain ${resolvedChainKey}`);
+  }
+
+  const v1Url = new URL(v1Endpoint);
+  v1Url.searchParams.set('sellToken', zeroXSellToken);
+  v1Url.searchParams.set('buyToken', zeroXBuyToken);
+  v1Url.searchParams.set('sellAmount', sellAmountRaw);
+  v1Url.searchParams.set('takerAddress', recipient);
+  v1Url.searchParams.set('slippagePercentage', '0.005');
+  if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
+    v1Url.searchParams.set('buyTokenPercentageFee', String(evmAltairFeePct));
+    v1Url.searchParams.set('feeRecipient', evmFeeRecipient);
+  }
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (zeroXApiKey) headers['0x-api-key'] = zeroXApiKey;
+
+  const v1CacheKey = buildQuoteCacheKey([
+    '0x',
+    'v1',
+    resolvedChainKey,
+    zeroXSellToken,
+    zeroXBuyToken,
+    sellAmountRaw,
+    recipient,
+  ]);
+  const cachedV1Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v1CacheKey);
+  let methodParameters: { to: string; calldata: string; value: string };
+
+  if (cachedV1Method) {
+    methodParameters = cachedV1Method;
+  } else {
+    console.log('[test-swap] 0x v1 request context', {
+      resolvedChainKey,
+      chainConfig,
+      tokenConfig,
+      normalizedSellToken,
+      normalizedBuyToken,
+      zeroXSellToken,
+      zeroXBuyToken,
+      sellAmountRaw,
+      recipient,
+      zeroXUrl: v1Url.toString(),
+    });
+
+    const v1Res = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v1 quote',
+        description: 'swap quote response',
+      },
+      () => fetch(v1Url.toString(), { headers, method: 'GET' })
+    );
+    if (!v1Res.ok) {
+      const errText = await v1Res.text();
+      let msg = errText;
+      try {
+        const errJson = JSON.parse(errText) as { message?: string };
+        if (errJson?.message?.toLowerCase().includes('no route')) {
+          msg = `No swap route on ${resolvedChainKey} (0x may have limited testnet liquidity). Try a different amount or chain.`;
+        }
+      } catch {
+        // keep msg
+      }
+      throw new Error(`0x ${resolvedChainKey} quote failed: ${msg}`);
+    }
+
+    const v1Payload = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v1 response.json',
+        description: 'parse 0x v1 response',
+      },
+      async () => (await v1Res.json()) as { to?: string; data?: string; value?: string }
+    );
+    if (!v1Payload?.to || !v1Payload?.data || v1Payload?.value === undefined) {
+      throw new Error(`0x ${resolvedChainKey} response missing to/data/value`);
+    }
+    methodParameters = { to: v1Payload.to, calldata: v1Payload.data, value: v1Payload.value };
+    setQuoteCache(v1CacheKey, methodParameters);
+  }
+
+  return {
+    methodParameters,
+    source: '0x v1',
+    chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
+    sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
+    buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
+    providerFee: null,
+  };
+}
+
+/**
+ * Execute 0x v2 swap quote (mainnets with allowance-holder)
+ */
+async function execute0xV2Swap(params: ZeroXV2SwapParams): Promise<ZeroXSwapResult> {
+  const {
+    resolvedChainKey,
+    chainConfig,
+    tokenConfig,
+    normalizedSellToken,
+    normalizedBuyToken,
+    zeroXV2SellToken,
+    zeroXV2BuyToken,
+    sellAmountRaw,
+    recipient,
+    evmFeeRecipient,
+    evmAltairFeePct,
+    zeroXApiKey,
+    resolvedEvmSellToken,
+    resolvedEvmBuyToken,
+  } = params;
+
+  if (!zeroXApiKey) {
+    throw new Error('ZEROX_API_KEY is required for 0x Swap API v2 (mainnet). Set it in .env and restart the server.');
+  }
+
+  const evmAltairFeeBps = evmAltairFeePct !== null && evmAltairFeePct > 0 ? pctToBps(evmAltairFeePct) : null;
+
+  const v2CacheKey = buildQuoteCacheKey([
+    '0x',
+    'v2',
+    resolvedChainKey,
+    zeroXV2SellToken,
+    zeroXV2BuyToken,
+    sellAmountRaw,
+    recipient,
+  ]);
+  const cachedV2Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v2CacheKey);
+  let methodParameters: { to: string; calldata: string; value: string };
+  let resolvedProviderFee: { token: string; amount: string; decimals: number | null } | null = null;
+
+  if (cachedV2Method) {
+    methodParameters = cachedV2Method;
+  } else {
+    // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
+    // swapFeeBps is in basis points (0.5% = 50 bps).
+    // swapFeeToken must be either the buyToken or sellToken address.
+    // Fees are deducted from the output (buy token), so we try swapFeeToken=buyToken first.
+    // Some token pairs fail validation with buyToken as the fee token, so we fall back to
+    // sellToken on SWAP_VALIDATION_FAILED.
+    const tryV2Quote = async (feeToken: string): Promise<Response> => {
+      const url = new URL('https://api.0x.org/swap/allowance-holder/quote');
+      url.searchParams.set('chainId', String(chainConfig.chainId));
+      url.searchParams.set('sellToken', zeroXV2SellToken);
+      url.searchParams.set('buyToken', zeroXV2BuyToken);
+      url.searchParams.set('sellAmount', sellAmountRaw);
+      url.searchParams.set('taker', recipient);
+      url.searchParams.set('slippageBps', '50');
+      if (evmFeeRecipient !== null && evmAltairFeeBps !== null) {
+        url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
+        url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
+        url.searchParams.set('swapFeeToken', feeToken);
+      }
+      return fetch(url.toString(), {
+        headers: {
+          Accept: 'application/json',
+          '0x-api-key': zeroXApiKey,
+          '0x-version': 'v2',
+        },
+        method: 'GET',
+      });
+    };
+
+    // Try with buyToken as fee token first (fees are deducted from output)
+    let v2Res = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v2 quote (feeToken=buyToken)',
+        description: 'swap quote response',
+      },
+      () => tryV2Quote(zeroXV2BuyToken)
+    );
+
+    // If validation failed, retry with sellToken as fee token
+    if (!v2Res.ok && evmAltairFeeBps !== null) {
+      const errText = await v2Res.text().catch(() => '');
+      if (errText.includes('SWAP_VALIDATION_FAILED')) {
+        console.log('[test-swap] 0x v2 SWAP_VALIDATION_FAILED with feeToken=buyToken, retrying with feeToken=sellToken');
+        v2Res = await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/test-swap/route.ts',
+            target: '0x v2 quote (feeToken=sellToken)',
+            description: 'swap quote response (fallback)',
+          },
+          () => tryV2Quote(zeroXV2SellToken)
+        );
+      }
+    }
+
+    console.log('[test-swap] 0x v2 request context', {
+      resolvedChainKey,
+      chainConfig,
+      tokenConfig,
+      normalizedSellToken,
+      normalizedBuyToken,
+      zeroXSellToken: zeroXV2SellToken,
+      zeroXBuyToken: zeroXV2BuyToken,
+      sellAmountRaw,
+      recipient,
+      zeroXUrl: v2Res.url,
+    });
+
+    if (!v2Res.ok) {
+      const errText = await v2Res.text();
+      let userMessage = `0x quote failed: ${errText}`;
+      try {
+        const errJson = JSON.parse(errText) as { message?: string };
+        if (errJson?.message?.toLowerCase().includes('no route')) {
+          userMessage = `No swap route for ${normalizedSellToken}/${normalizedBuyToken} on ${resolvedChainKey}. Check chain and token addresses or increase amount.`;
+        }
+      } catch {
+        // keep userMessage
+      }
+      throw new Error(userMessage);
+    }
+
+    const v2Payload = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v2 response.json',
+        description: 'parse 0x v2 response',
+      },
+      async () =>
+        (await v2Res.json()) as {
+          liquidityAvailable?: boolean;
+          transaction?: { to: string; data: string; value: string; gas?: string };
+          fees?: {
+            integratorFee?: {
+              amount: string;
+              token: string;
+              type: string;
+            };
+            zeroExFee?: {
+              amount: string;
+              token: string;
+              type: string;
+            };
+          };
+        }
+    );
+    if (v2Payload.liquidityAvailable === false || !v2Payload.transaction) {
+      throw new Error(`No liquidity for ${normalizedSellToken}/${normalizedBuyToken} on chain ${chainConfig.chainId}.`);
+    }
+    const tx = v2Payload.transaction;
+    if (!tx.to || !tx.data || tx.value === undefined) {
+      throw new Error('0x quote response missing transaction fields');
+    }
+    methodParameters = { to: tx.to, calldata: tx.data, value: tx.value };
+    setQuoteCache(v2CacheKey, methodParameters);
+    // Extract the 0x protocol fee (zeroExFee) from the v2 response for provider fee tracking
+    if (v2Payload.fees?.zeroExFee?.amount && v2Payload.fees?.zeroExFee?.token) {
+      resolvedProviderFee = {
+        token: v2Payload.fees.zeroExFee.token,
+        amount: v2Payload.fees.zeroExFee.amount,
+        decimals: null, // 0x returns fee amount in the token's raw units; decimals are not provided in the fee object
+      };
+      console.log('[test-swap] Extracted 0x protocol fee from v2 response:', resolvedProviderFee);
+    }
+  }
+
+  return {
+    methodParameters,
+    source: '0x v2',
+    chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
+    sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
+    buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
+    providerFee: resolvedProviderFee,
+  };
+}
+
+// ============================================================================
+// Main POST Handler
+// ============================================================================
 
 export async function POST(req: Request) {
   try {
@@ -2313,250 +2683,52 @@ export async function POST(req: Request) {
       );
     }
 
-    const v1TestnetEndpoints: Partial<Record<ChainKey, string>> = {
-      ETH_SEPOLIA: 'https://sepolia.api.0x.org/swap/v1/quote',
-      BASE_SEPOLIA: 'https://base-sepolia.api.0x.org/swap/v1/quote',
+    // Use provider fallback system to iterate through available providers
+    const swapParams = {
+      resolvedChainKey,
+      chainConfig,
+      tokenConfig,
+      normalizedSellToken,
+      normalizedBuyToken,
+      zeroXSellToken,
+      zeroXBuyToken,
+      zeroXV2SellToken,
+      zeroXV2BuyToken,
+      sellAmountRaw,
+      recipient,
+      evmFeeRecipient,
+      evmAltairFeePct,
+      zeroXApiKey: zeroXApiKey ?? null,
+      resolvedEvmSellToken,
+      resolvedEvmBuyToken,
     };
 
-    const v1Endpoint = v1TestnetEndpoints[resolvedChainKey];
-    let methodParameters: { to: string; calldata: string; value: string };
+    const result = await executeWithProviderFallback<ZeroXSwapResult>(
+      resolvedChainKey,
+      async (context) => {
+        console.log(`[test-swap] Attempting ${context.provider} (attempt ${context.attemptNumber})`);
 
-    if (v1Endpoint) {
-      const v1Url = new URL(v1Endpoint);
-      v1Url.searchParams.set('sellToken', zeroXSellToken);
-      v1Url.searchParams.set('buyToken', zeroXBuyToken);
-      v1Url.searchParams.set('sellAmount', sellAmountRaw);
-      v1Url.searchParams.set('takerAddress', recipient);
-      v1Url.searchParams.set('slippagePercentage', '0.005');
-      if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
-        v1Url.searchParams.set('buyTokenPercentageFee', String(evmAltairFeePct));
-        v1Url.searchParams.set('feeRecipient', evmFeeRecipient);
-      }
-      const headers: Record<string, string> = { Accept: 'application/json' };
-      if (zeroXApiKey) headers['0x-api-key'] = zeroXApiKey;
-
-      const v1CacheKey = buildQuoteCacheKey([
-        '0x',
-        'v1',
-        resolvedChainKey,
-        zeroXSellToken,
-        zeroXBuyToken,
-        sellAmountRaw,
-        recipient,
-      ]);
-      const cachedV1Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v1CacheKey);
-      if (cachedV1Method) {
-        methodParameters = cachedV1Method;
-      } else {
-
-      console.log('[test-swap] 0x v1 request context', {
-        resolvedChainKey,
-        chainConfig,
-        tokenConfig,
-        normalizedSellToken,
-        normalizedBuyToken,
-        zeroXSellToken,
-        zeroXBuyToken,
-        sellAmountRaw,
-        recipient,
-        zeroXUrl: v1Url.toString(),
-      });
-
-        const v1Res = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v1 quote',
-            description: 'swap quote response',
-          },
-          () => fetch(v1Url.toString(), { headers, method: 'GET' })
-        );
-        if (!v1Res.ok) {
-          const errText = await v1Res.text();
-          let msg = errText;
-          try {
-            const errJson = JSON.parse(errText) as { message?: string };
-            if (errJson?.message?.toLowerCase().includes('no route')) {
-              msg = `No swap route on ${resolvedChainKey} (0x may have limited testnet liquidity). Try a different amount or chain.`;
-            }
-          } catch {
-            // keep msg
-          }
-          return NextResponse.json({ error: `0x ${resolvedChainKey} quote failed: ${msg}` }, { status: 500 });
-        }
-
-        const v1Payload = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v1 response.json',
-            description: 'parse 0x v1 response',
-          },
-          async () => (await v1Res.json()) as { to?: string; data?: string; value?: string }
-        );
-        if (!v1Payload?.to || !v1Payload?.data || v1Payload?.value === undefined) {
-          return NextResponse.json({ error: `0x ${resolvedChainKey} response missing to/data/value` }, { status: 500 });
-        }
-        methodParameters = { to: v1Payload.to, calldata: v1Payload.data, value: v1Payload.value };
-        setQuoteCache(v1CacheKey, methodParameters);
-      }
-    } else {
-      if (!zeroXApiKey) {
-        return NextResponse.json(
-          { error: 'ZEROX_API_KEY is required for 0x Swap API v2 (mainnet). Set it in .env and restart the server.' },
-          { status: 500 }
-        );
-      }
-
-      const evmAltairFeeBps = evmAltairFeePct !== null && evmAltairFeePct > 0 ? pctToBps(evmAltairFeePct) : null;
-
-      const v2CacheKey = buildQuoteCacheKey([
-        '0x',
-        'v2',
-        resolvedChainKey,
-        zeroXV2SellToken,
-        zeroXV2BuyToken,
-        sellAmountRaw,
-        recipient,
-      ]);
-      const cachedV2Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v2CacheKey);
-      if (cachedV2Method) {
-        methodParameters = cachedV2Method;
-      } else {
-        // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
-        // swapFeeBps is in basis points (0.5% = 50 bps).
-        // swapFeeToken must be either the buyToken or sellToken address.
-        // Fees are deducted from the output (buy token), so we try swapFeeToken=buyToken first.
-        // Some token pairs fail validation with buyToken as the fee token, so we fall back to
-        // sellToken on SWAP_VALIDATION_FAILED.
-        const tryV2Quote = async (feeToken: string): Promise<Response> => {
-          const url = new URL('https://api.0x.org/swap/allowance-holder/quote');
-          url.searchParams.set('chainId', String(chainConfig.chainId));
-          url.searchParams.set('sellToken', zeroXV2SellToken);
-          url.searchParams.set('buyToken', zeroXV2BuyToken);
-          url.searchParams.set('sellAmount', sellAmountRaw);
-          url.searchParams.set('taker', recipient);
-          url.searchParams.set('slippageBps', '50');
-          if (evmFeeRecipient !== null && evmAltairFeeBps !== null) {
-            url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
-            url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
-            url.searchParams.set('swapFeeToken', feeToken);
-          }
-          return fetch(url.toString(), {
-            headers: {
-              Accept: 'application/json',
-              '0x-api-key': zeroXApiKey,
-              '0x-version': 'v2',
-            },
-            method: 'GET',
-          });
-        };
-
-        // Try with buyToken as fee token first (fees are deducted from output)
-        let v2Res = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v2 quote (feeToken=buyToken)',
-            description: 'swap quote response',
-          },
-          () => tryV2Quote(zeroXV2BuyToken)
-        );
-
-        // If validation failed, retry with sellToken as fee token
-        if (!v2Res.ok && evmAltairFeeBps !== null) {
-          const errText = await v2Res.text().catch(() => '');
-          if (errText.includes('SWAP_VALIDATION_FAILED')) {
-            console.log('[test-swap] 0x v2 SWAP_VALIDATION_FAILED with feeToken=buyToken, retrying with feeToken=sellToken');
-            v2Res = await withWaitLogger(
-              {
-                file: 'altair_backend1/src/app/api/test-swap/route.ts',
-                target: '0x v2 quote (feeToken=sellToken)',
-                description: 'swap quote response (fallback)',
-              },
-              () => tryV2Quote(zeroXV2SellToken)
-            );
-          }
-        }
-
-        console.log('[test-swap] 0x v2 request context', {
-          resolvedChainKey,
-          chainConfig,
-          tokenConfig,
-          normalizedSellToken,
-          normalizedBuyToken,
-          zeroXSellToken: zeroXV2SellToken,
-          zeroXBuyToken: zeroXV2BuyToken,
-          sellAmountRaw,
-          recipient,
-          zeroXUrl: v2Res.url,
-        });
-
-        if (!v2Res.ok) {
-          const errText = await v2Res.text();
-          let userMessage = `0x quote failed: ${errText}`;
-          try {
-            const errJson = JSON.parse(errText) as { message?: string };
-            if (errJson?.message?.toLowerCase().includes('no route')) {
-              userMessage = `No swap route for ${normalizedSellToken}/${normalizedBuyToken} on ${resolvedChainKey}. Check chain and token addresses or increase amount.`;
-            }
-          } catch {
-            // keep userMessage
-          }
-          return NextResponse.json({ error: userMessage }, { status: 500 });
-        }
-
-        const v2Payload = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v2 response.json',
-            description: 'parse 0x v2 response',
-          },
-          async () =>
-            (await v2Res.json()) as {
-              liquidityAvailable?: boolean;
-              transaction?: { to: string; data: string; value: string; gas?: string };
-              fees?: {
-                integratorFee?: {
-                  amount: string;
-                  token: string;
-                  type: string;
-                };
-                zeroExFee?: {
-                  amount: string;
-                  token: string;
-                  type: string;
-                };
-              };
-            }
-        );
-        if (v2Payload.liquidityAvailable === false || !v2Payload.transaction) {
-          return NextResponse.json(
-            { error: `No liquidity for ${normalizedSellToken}/${normalizedBuyToken} on chain ${chainConfig.chainId}.` },
-            { status: 500 }
-          );
-        }
-        const tx = v2Payload.transaction;
-        if (!tx.to || !tx.data || tx.value === undefined) {
-          return NextResponse.json({ error: '0x quote response missing transaction fields' }, { status: 500 });
-        }
-        methodParameters = { to: tx.to, calldata: tx.data, value: tx.value };
-        setQuoteCache(v2CacheKey, methodParameters);
-        // Extract the 0x protocol fee (zeroExFee) from the v2 response for provider fee tracking
-        if (v2Payload.fees?.zeroExFee?.amount && v2Payload.fees?.zeroExFee?.token) {
-          resolvedProviderFee = {
-            token: v2Payload.fees.zeroExFee.token,
-            amount: v2Payload.fees.zeroExFee.amount,
-            decimals: null, // 0x returns fee amount in the token's raw units; decimals are not provided in the fee object
-          };
-          console.log('[test-swap] Extracted 0x protocol fee from v2 response:', resolvedProviderFee);
+        if (context.provider === '0x v1') {
+          return await execute0xV1Swap(swapParams);
+        } else if (context.provider === '0x v2') {
+          return await execute0xV2Swap(swapParams);
+        } else {
+          throw new Error(`Unknown provider: ${context.provider}`);
         }
       }
+    );
+
+    // Update resolvedProviderFee if the provider returned one
+    if (result.providerFee) {
+      resolvedProviderFee = result.providerFee;
     }
 
     const responseBody = {
-      methodParameters,
-      source: '0x',
-      chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
-      sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
-      buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
+      methodParameters: result.methodParameters,
+      source: result.source,
+      chainRpcCandidates: result.chainRpcCandidates,
+      sellTokenAddress: result.sellTokenAddress,
+      buyTokenAddress: result.buyTokenAddress,
     };
     return NextResponse.json(responseBody);
   } catch (error) {

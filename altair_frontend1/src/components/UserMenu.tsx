@@ -65,6 +65,7 @@ export default function UserMenu() {
     closeWalletPanel,
     addWalletPanel,
     transactionInfoPanels,
+    setTransactionInfoPanels,
     addTransactionInfoPanel,
     updateTransactionInfoPanel,
     closeTransactionInfoPanel,
@@ -1393,11 +1394,13 @@ export default function UserMenu() {
     };
   }, [authenticated, selectedChain, wallets, solanaWallets, activeNetworkOptions]);
 
-  // TRANSACTION_INFO_PANEL: create on swap-submitted, update on swap-complete.
+  // TRANSACTION_INFO_PANEL: pre-create on swap-confirmed, populate txHash on swap-submitted, update on swap-complete.
   const addTransactionInfoPanelRef = useRef(addTransactionInfoPanel);
   const updateTransactionInfoPanelRef = useRef(updateTransactionInfoPanel);
+  const setTransactionInfoPanelsRef = useRef(setTransactionInfoPanels);
   addTransactionInfoPanelRef.current = addTransactionInfoPanel;
   updateTransactionInfoPanelRef.current = updateTransactionInfoPanel;
+  setTransactionInfoPanelsRef.current = setTransactionInfoPanels;
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1446,6 +1449,39 @@ export default function UserMenu() {
       }
     };
 
+    const handleSwapConfirmedForPanel = (event: Event) => {
+      const detail = (event as CustomEvent).detail as {
+        sellToken?: string;
+        buyToken?: string;
+        sellChain?: ChainKey;
+        buyChain?: ChainKey;
+        amount?: string;
+      } | undefined;
+      if (!detail) return;
+      const sellChain = detail.sellChain;
+      const buyChain = detail.buyChain;
+      const sellToken = (detail.sellToken ?? '').toUpperCase();
+      const buyToken = (detail.buyToken ?? '').toUpperCase();
+      if (!sellChain || !buyChain || !sellToken || !buyToken) return;
+
+      const buyTokenSnapshot = balancesByChainRef.current?.[buyChain]?.tokens?.[buyToken];
+      const { raw: buyBalanceBeforeRaw, decimals: buyTokenDecimals } = toRawString(buyTokenSnapshot);
+
+      addTransactionInfoPanelRef.current({
+        txKey: null,
+        txHash: null,
+        sellChain,
+        buyChain,
+        sellToken,
+        buyToken,
+        sellAmount: detail.amount ?? '',
+        buyAmount: null,
+        buyBalanceBeforeRaw,
+        buyTokenDecimals,
+        status: 'pending',
+      });
+    };
+
     const handleSwapSubmittedForPanel = (event: Event) => {
       const detail = (event as CustomEvent).detail as {
         sellToken?: string;
@@ -1462,23 +1498,46 @@ export default function UserMenu() {
       const sellToken = (detail.sellToken ?? '').toUpperCase();
       const buyToken = (detail.buyToken ?? '').toUpperCase();
       if (!sellChain || !buyChain || !sellToken || !buyToken) return;
-
-      const buyTokenSnapshot = balancesByChainRef.current?.[buyChain]?.tokens?.[buyToken];
-      const { raw: buyBalanceBeforeRaw, decimals: buyTokenDecimals } = toRawString(buyTokenSnapshot);
       const txKey = detail.txHash ?? detail.requestId ?? null;
 
-      addTransactionInfoPanelRef.current({
-        txKey,
-        txHash: detail.txHash ?? null,
-        sellChain,
-        buyChain,
-        sellToken,
-        buyToken,
-        sellAmount: detail.amount ?? '',
-        buyAmount: null,
-        buyBalanceBeforeRaw,
-        buyTokenDecimals,
-        status: 'pending',
+      setTransactionInfoPanelsRef.current((current) => {
+        for (let i = current.length - 1; i >= 0; i -= 1) {
+          const panel = current[i];
+          if (panel.status !== 'pending') continue;
+          if (panel.txKey !== null) continue;
+          if (panel.sellToken !== sellToken) continue;
+          if (panel.buyToken !== buyToken) continue;
+          if (panel.sellChain !== sellChain) continue;
+          const next = current.slice();
+          next[i] = {
+            ...panel,
+            txKey,
+            txHash: detail.txHash ?? null,
+            sellAmount: detail.amount ?? panel.sellAmount,
+          };
+          return next;
+        }
+
+        const buyTokenSnapshot = balancesByChainRef.current?.[buyChain]?.tokens?.[buyToken];
+        const { raw: buyBalanceBeforeRaw, decimals: buyTokenDecimals } = toRawString(buyTokenSnapshot);
+        const nextId = (current.reduce((max, p) => Math.max(max, p.id), 0)) + 1;
+        return [
+          ...current,
+          {
+            id: nextId,
+            txKey,
+            txHash: detail.txHash ?? null,
+            sellChain,
+            buyChain,
+            sellToken,
+            buyToken,
+            sellAmount: detail.amount ?? '',
+            buyAmount: null,
+            buyBalanceBeforeRaw,
+            buyTokenDecimals,
+            status: 'pending',
+          },
+        ];
       });
     };
 
@@ -1530,9 +1589,11 @@ export default function UserMenu() {
       );
     };
 
+    window.addEventListener('altair:swap-confirmed', handleSwapConfirmedForPanel);
     window.addEventListener('altair:swap-submitted', handleSwapSubmittedForPanel);
     window.addEventListener('altair:swap-complete', handleSwapCompleteForPanel);
     return () => {
+      window.removeEventListener('altair:swap-confirmed', handleSwapConfirmedForPanel);
       window.removeEventListener('altair:swap-submitted', handleSwapSubmittedForPanel);
       window.removeEventListener('altair:swap-complete', handleSwapCompleteForPanel);
     };

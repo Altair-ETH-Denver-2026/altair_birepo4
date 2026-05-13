@@ -106,4 +106,10 @@ export const SWAP_PROVIDER_OPTIONS = {
   SOLANA_DEVNET: [
     'Jupiter Ultra',
   ],
+  CROSS_CHAIN_SWAP: [
+    'Relay',
+  ],
+  BRIDGE: [
+    'Relay',
+  ]
 }
