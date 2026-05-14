@@ -427,7 +427,7 @@ export const TRANSACTION_INFO_PANEL_DISPLAY = { // TRANSACTION_INFO_PANEL sizing
       fontName: 'sans-serif',
     },
     statusText: { // "Executing"/"Executed" label rendered above the arrow
-      executingLabel: 'Executing',
+      executingLabel: 'Executing...',
       executedLabel: 'Executed!',
       fontSize: 12,
       fontName: 'sans-serif',
@@ -474,7 +474,7 @@ export const TRANSACTION_INFO_PANEL_DISPLAY = { // TRANSACTION_INFO_PANEL sizing
       paddingTop: 0,
     },
     pendingText: { // Italic "Pending" string shown for the buy amount while the swap is in flight
-      label: 'Pending',
+      label: 'Pending...',
       fontStyle: 'italic',
       color: '#9ca3af',
     },
@@ -511,7 +511,7 @@ export const TRANSACTION_INFO_PANEL_DISPLAY = { // TRANSACTION_INFO_PANEL sizing
       fontName: 'sans-serif',
     },
     statusText: { // "Executing"/"Executed" label rendered above the arrow
-      executingLabel: 'Executing',
+      executingLabel: 'Executing...',
       executedLabel: 'Executed!',
       fontSize: 12,
       fontName: 'sans-serif',
@@ -558,7 +558,7 @@ export const TRANSACTION_INFO_PANEL_DISPLAY = { // TRANSACTION_INFO_PANEL sizing
       paddingTop: 0,
     },
     pendingText: { // Italic "Pending" string shown for the buy amount while the swap is in flight
-      label: 'Pending',
+      label: 'Pending...',
       fontStyle: 'italic',
       color: '#9ca3af',
     },

@@ -67,7 +67,6 @@ export default function UserMenu() {
     transactionInfoPanels,
     setTransactionInfoPanels,
     addTransactionInfoPanel,
-    updateTransactionInfoPanel,
     closeTransactionInfoPanel,
   } = usePanels({ initialChain: selectedChain });
   const [isDevOpen, setIsDevOpen] = useState(false);
@@ -1396,10 +1395,8 @@ export default function UserMenu() {
 
   // TRANSACTION_INFO_PANEL: pre-create on swap-confirmed, populate txHash on swap-submitted, update on swap-complete.
   const addTransactionInfoPanelRef = useRef(addTransactionInfoPanel);
-  const updateTransactionInfoPanelRef = useRef(updateTransactionInfoPanel);
   const setTransactionInfoPanelsRef = useRef(setTransactionInfoPanels);
   addTransactionInfoPanelRef.current = addTransactionInfoPanel;
-  updateTransactionInfoPanelRef.current = updateTransactionInfoPanel;
   setTransactionInfoPanelsRef.current = setTransactionInfoPanels;
 
   useEffect(() => {
@@ -1561,32 +1558,74 @@ export default function UserMenu() {
       const sellChainFromDetail = detail.chain;
       const txKey = detail.txHash ?? detail.requestId ?? null;
 
-      updateTransactionInfoPanelRef.current(
-        (panel) => {
-          if (panel.status !== 'pending') return false;
-          if (txKey && panel.txKey && panel.txKey === txKey) return true;
-          if (panel.sellToken !== sellToken) return false;
-          if (panel.buyToken !== buyToken) return false;
-          if (sellChainFromDetail && panel.sellChain !== sellChainFromDetail) return false;
-          return true;
-        },
-        (panel) => {
-          const buyEntry = (detail.balanceUpdates ?? []).find(
-            (entry) =>
-              (entry.symbol ?? '').toUpperCase() === panel.buyToken &&
-              (entry.chain === panel.buyChain)
-          );
-          if (buyEntry?.balanceAfterRaw) {
-            const decimals = panel.buyTokenDecimals ?? buyEntry.decimals ?? 0;
-            return {
-              status: 'complete' as const,
-              buyAmount: rawDeltaToHuman(buyEntry.balanceAfterRaw, panel.buyBalanceBeforeRaw, decimals),
-              buyTokenDecimals: decimals,
-            };
+      setTransactionInfoPanelsRef.current((current) => {
+        let matchedIndex = -1;
+        if (txKey) {
+          for (let i = current.length - 1; i >= 0; i -= 1) {
+            const panel = current[i];
+            if (panel.status !== 'pending') continue;
+            if (panel.txKey && panel.txKey === txKey) {
+              matchedIndex = i;
+              break;
+            }
           }
-          return { status: 'complete' as const };
         }
-      );
+        if (matchedIndex === -1) {
+          for (let i = current.length - 1; i >= 0; i -= 1) {
+            const panel = current[i];
+            if (panel.status !== 'pending') continue;
+            if (panel.sellToken !== sellToken) continue;
+            if (panel.buyToken !== buyToken) continue;
+            if (sellChainFromDetail && panel.sellChain !== sellChainFromDetail) continue;
+            matchedIndex = i;
+            break;
+          }
+        }
+        if (matchedIndex === -1) {
+          for (let i = current.length - 1; i >= 0; i -= 1) {
+            const panel = current[i];
+            if (panel.status !== 'pending') continue;
+            if (panel.buyToken !== buyToken) continue;
+            matchedIndex = i;
+            break;
+          }
+        }
+        if (matchedIndex === -1) {
+          console.warn('[TransactionInfoPanel] swap-complete fired with no matching pending side panel', {
+            txKey,
+            sellToken,
+            buyToken,
+            sellChainFromDetail,
+          });
+          return current;
+        }
+        const panel = current[matchedIndex];
+        const buyEntry = (detail.balanceUpdates ?? []).find(
+          (entry) =>
+            (entry.symbol ?? '').toUpperCase() === panel.buyToken &&
+            (entry.chain === panel.buyChain)
+        );
+        const next = current.slice();
+        if (buyEntry?.balanceAfterRaw) {
+          const decimals = panel.buyTokenDecimals ?? buyEntry.decimals ?? 0;
+          next[matchedIndex] = {
+            ...panel,
+            status: 'complete',
+            buyAmount: rawDeltaToHuman(buyEntry.balanceAfterRaw, panel.buyBalanceBeforeRaw, decimals),
+            buyTokenDecimals: decimals,
+            txKey: panel.txKey ?? txKey,
+            txHash: panel.txHash ?? (detail.txHash ?? null),
+          };
+        } else {
+          next[matchedIndex] = {
+            ...panel,
+            status: 'complete',
+            txKey: panel.txKey ?? txKey,
+            txHash: panel.txHash ?? (detail.txHash ?? null),
+          };
+        }
+        return next;
+      });
     };
 
     window.addEventListener('altair:swap-confirmed', handleSwapConfirmedForPanel);

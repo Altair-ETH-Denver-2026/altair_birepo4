@@ -1415,6 +1415,7 @@ export const useRelay = () => {
             chain: intent.sellTokenChain,
             sellToken: sellSymbolNorm,
             buyToken: buySymbolNorm,
+            requestId: requestId ?? undefined,
             balanceUpdates: writebackBalanceUpdates,
           },
         })

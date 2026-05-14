@@ -73,6 +73,18 @@ export const BALANCE_RULES = {
   }
 }
 
+export const PRICE_RULES = {
+  fetchAllConditions: {
+    periodically: 5, // Measured in minutes. Asynchronously, periodically, the backend pulls all token prices based on the value of PRICE_RULES.fetchAllConditions.periodically
+    // login: false, not yet active
+    // refresh: false, not yet active
+    // openWallet: false, not yet active
+    // changeChain: false, not yet active
+    // swapComplete: false, not yet active
+    // swapStart: false, not yet active
+  }
+}
+
 export const DEFAULT_TOKENS = { // These are added when a user creates their account
   ETH_MAINNET: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
   ETH_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],

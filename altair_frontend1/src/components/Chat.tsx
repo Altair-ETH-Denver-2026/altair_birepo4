@@ -739,44 +739,78 @@ export default function Chat() {
       }
 
       setMessages((prev) => {
-        for (let i = 0; i < prev.length; i += 1) {
-          const message = prev[i];
-          const panel = message.transactionInfoPanel;
-          if (!panel) continue;
-          if (panel.status !== 'pending') continue;
-          const txKeyMatches = txKey && panel.txKey && panel.txKey === txKey;
-          if (!txKeyMatches) {
+        let matchedIndex = -1;
+        if (txKey) {
+          for (let i = prev.length - 1; i >= 0; i -= 1) {
+            const panel = prev[i]?.transactionInfoPanel;
+            if (!panel) continue;
+            if (panel.status !== 'pending') continue;
+            if (panel.txKey && panel.txKey === txKey) {
+              matchedIndex = i;
+              break;
+            }
+          }
+        }
+        if (matchedIndex === -1) {
+          for (let i = prev.length - 1; i >= 0; i -= 1) {
+            const panel = prev[i]?.transactionInfoPanel;
+            if (!panel) continue;
+            if (panel.status !== 'pending') continue;
             if (panel.sellToken !== sellToken) continue;
             if (panel.buyToken !== buyToken) continue;
             if (sellChainFromDetail && panel.sellChain !== sellChainFromDetail) continue;
+            matchedIndex = i;
+            break;
           }
-          const buyEntry = (detail.balanceUpdates ?? []).find(
-            (entry) =>
-              (entry.symbol ?? '').toUpperCase() === panel.buyToken &&
-              entry.chain === panel.buyChain
-          );
-          let nextBuyAmount: string | null = panel.buyAmount;
-          let nextDecimals = panel.buyTokenDecimals;
-          if (buyEntry?.balanceAfterRaw) {
-            nextDecimals = panel.buyTokenDecimals ?? buyEntry.decimals ?? 0;
-            nextBuyAmount = rawDeltaToHuman(buyEntry.balanceAfterRaw, panel.buyBalanceBeforeRaw, nextDecimals);
-          } else if (resolvedBuyAmount) {
-            nextBuyAmount = resolvedBuyAmount;
-            nextDecimals = resolvedDecimals ?? nextDecimals;
-          }
-          const next = [...prev];
-          next[i] = {
-            ...message,
-            transactionInfoPanel: {
-              ...panel,
-              status: 'complete',
-              buyAmount: nextBuyAmount,
-              buyTokenDecimals: nextDecimals,
-            },
-          };
-          return next;
         }
-        return prev;
+        if (matchedIndex === -1) {
+          for (let i = prev.length - 1; i >= 0; i -= 1) {
+            const panel = prev[i]?.transactionInfoPanel;
+            if (!panel) continue;
+            if (panel.status !== 'pending') continue;
+            if (panel.buyToken !== buyToken) continue;
+            matchedIndex = i;
+            break;
+          }
+        }
+        if (matchedIndex === -1) {
+          console.warn('[TransactionInfoPanel] swap-complete fired with no matching pending in-chat panel', {
+            txKey,
+            sellToken,
+            buyToken,
+            sellChainFromDetail,
+          });
+          return prev;
+        }
+        const message = prev[matchedIndex];
+        const panel = message.transactionInfoPanel!;
+        const buyEntry = (detail.balanceUpdates ?? []).find(
+          (entry) =>
+            (entry.symbol ?? '').toUpperCase() === panel.buyToken &&
+            entry.chain === panel.buyChain
+        );
+        let nextBuyAmount: string | null = panel.buyAmount;
+        let nextDecimals = panel.buyTokenDecimals;
+        if (buyEntry?.balanceAfterRaw) {
+          nextDecimals = panel.buyTokenDecimals ?? buyEntry.decimals ?? 0;
+          nextBuyAmount = rawDeltaToHuman(buyEntry.balanceAfterRaw, panel.buyBalanceBeforeRaw, nextDecimals);
+        } else if (resolvedBuyAmount) {
+          nextBuyAmount = resolvedBuyAmount;
+          nextDecimals = resolvedDecimals ?? nextDecimals;
+        }
+        const next = prev.slice();
+        next[matchedIndex] = {
+          ...message,
+          transactionInfoPanel: {
+            ...panel,
+            status: 'complete',
+            buyAmount: nextBuyAmount,
+            buyTokenDecimals: nextDecimals,
+            txKey: panel.txKey ?? txKey,
+            txHash: panel.txHash ?? (detail.txHash ?? null),
+          },
+        };
+        return next;
       });
     };
 

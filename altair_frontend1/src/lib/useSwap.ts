@@ -412,6 +412,7 @@ export const useSwap = (explicitChain?: ChainKey) => {
                   chain: selectedChain,
                   sellToken: effectiveSell,
                   buyToken: normalizedBuy,
+                  txHash: tx.hash,
                   balanceUpdates: Array.isArray(writebackPayload?.balanceUpdates)
                     ? writebackPayload.balanceUpdates
                     : [],
