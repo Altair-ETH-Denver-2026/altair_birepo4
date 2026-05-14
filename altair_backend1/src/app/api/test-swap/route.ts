@@ -851,7 +851,7 @@ const saveJupiterToken = async (token: {
           {
             $set: {
               mint: token.id,
-              chain: 'Solana',
+              chain: 'SOLANA_MAINNET',
               chainId: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
               symbol: token.symbol ?? null,
               name: token.name ?? null,
@@ -870,7 +870,7 @@ const saveJupiterToken = async (token: {
     );
     console.log('[test-swap] saved token from Jupiter', {
       mint: token.id,
-      chain: 'Solana',
+      chain: 'SOLANA_MAINNET',
       chainId: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
       symbol: token.symbol,
       name: token.name,
