@@ -18,8 +18,36 @@ export const COINGECKO_NATIVE_COIN_IDS: Partial<Record<ChainKey, string>> = {
   SOLANA_MAINNET: 'solana',
 };
 
+export type CoinGeckoTier = 'demo' | 'pro';
+
+// CoinGecko ships two split tiers. Demo (free) and Pro (paid) have different
+// base URLs and different auth header names; mixing them yields a 400.
+const TIER_ENDPOINTS: Record<CoinGeckoTier, { baseUrl: string; apiKeyHeader: string }> = {
+  demo: {
+    baseUrl: 'https://api.coingecko.com/api/v3',
+    apiKeyHeader: 'x-cg-demo-api-key',
+  },
+  pro: {
+    baseUrl: 'https://pro-api.coingecko.com/api/v3',
+    apiKeyHeader: 'x-cg-pro-api-key',
+  },
+};
+
+/**
+ * Resolves which CoinGecko tier to use. Override with `COINGECKO_TIER=pro`
+ * once on a paid plan. Defaults to `demo` — matches a free CoinGecko API key.
+ */
+export function resolveCoinGeckoTier(): CoinGeckoTier {
+  const raw = process.env.COINGECKO_TIER?.trim().toLowerCase();
+  return raw === 'pro' ? 'pro' : 'demo';
+}
+
+export function resolveCoinGeckoEndpoint(): { baseUrl: string; apiKeyHeader: string; tier: CoinGeckoTier } {
+  const tier = resolveCoinGeckoTier();
+  return { ...TIER_ENDPOINTS[tier], tier };
+}
+
 export const COINGECKO_API = {
-  baseUrl: 'https://pro-api.coingecko.com/api/v3',
   // Comma-separated contract_addresses cap per request. CoinGecko docs don't
   // publish a hard limit; 50 is a safe ceiling that keeps URL length sane.
   contractBatchSize: 50,

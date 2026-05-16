@@ -77,7 +77,7 @@ export const PRICE_RULES = {
   fetchAllConditions: {
     periodically: 5, // Measured in minutes. Asynchronously, periodically, the backend pulls all token prices based on the value of PRICE_RULES.fetchAllConditions.periodically
     // login: false, not yet active
-    // refresh: false, not yet active
+    refresh: true, // Runs when the page is opened or refreshed
     // openWallet: false, not yet active
     // changeChain: false, not yet active
     // swapComplete: false, not yet active

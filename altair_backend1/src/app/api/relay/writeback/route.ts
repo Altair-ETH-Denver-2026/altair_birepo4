@@ -11,6 +11,8 @@ import { buildCorsHeaders } from '@/lib/appUrls';
 import { type BalanceEntry, updateBalancesInMongoDB, getBalancesFromMongoDB } from '@/lib/balanceService';
 import { CHAINS, type ChainKey } from '../../../../../config/blockchain_config';
 import { computeFeeAmount } from '@/lib/feeResolver';
+import { recordTokenIfMissing, buildEvmNativeMint, isNativeGasSymbol } from '@/lib/tokenRegistry';
+import { computeApproxBuyPrice, setPriceIfMissing } from '@/lib/priceMath';
 
 const corsHeaders = buildCorsHeaders(null);
 
@@ -361,6 +363,80 @@ export async function POST(req: Request) {
     // Fetch balanceBefore from MongoDB when not provided by frontend
     const sellChainKey = normalizeChainKey(sellToken.chain);
     const buyChainKey = normalizeChainKey(buyToken.chain);
+
+    // Resolve mint keys for both sides of the swap. For EVM native ETH (no real
+    // contract address in the payload) we substitute the synthetic native mint so
+    // the token still gets a row in `tokens`. Solana native SOL uses its
+    // contractAddress directly (which is the WSOL mint per tokenConfig).
+    const resolveMintForPayload = (
+      chain: ChainKey | null,
+      symbol: string | null | undefined,
+      contractAddress: string | null | undefined
+    ): string | null => {
+      if (!chain) return null;
+      if (isNativeGasSymbol(symbol, chain) && (chain === 'ETH_MAINNET' || chain === 'ETH_SEPOLIA' || chain === 'BASE_MAINNET' || chain === 'BASE_SEPOLIA')) {
+        return buildEvmNativeMint(chain);
+      }
+      const trimmed = typeof contractAddress === 'string' ? contractAddress.trim() : '';
+      return trimmed || null;
+    };
+
+    const sellMintForRegistry = resolveMintForPayload(sellChainKey, sellToken.symbol, sellToken.contractAddress);
+    const buyMintForRegistry = resolveMintForPayload(buyChainKey, buyToken.symbol, buyToken.contractAddress);
+
+    // Record sell/buy tokens (bridges + cross-chain swaps). The writeback payload
+    // already carries contractAddress/symbol/decimals from the frontend, so no
+    // external API call is needed. recordTokenIfMissing is idempotent and never
+    // overwrites existing rows.
+    if (sellChainKey && sellMintForRegistry) {
+      await recordTokenIfMissing({
+        mint: sellMintForRegistry,
+        chain: sellChainKey,
+        symbol: sellToken.symbol || null,
+        decimals: typeof sellToken.decimals === 'number' ? sellToken.decimals : null,
+        source: isNativeGasSymbol(sellToken.symbol, sellChainKey) ? 'config' : 'relay',
+      });
+    }
+    if (buyChainKey && buyMintForRegistry) {
+      await recordTokenIfMissing({
+        mint: buyMintForRegistry,
+        chain: buyChainKey,
+        symbol: buyToken.symbol || null,
+        decimals: typeof buyToken.decimals === 'number' ? buyToken.decimals : null,
+        source: isNativeGasSymbol(buyToken.symbol, buyChainKey) ? 'config' : 'relay',
+      });
+    }
+
+    // Back-fill an approximate USD price for the buyToken when it's brand new,
+    // anchored on sellToken's stored price. setPriceIfMissing is a no-op when
+    // the buyToken already has a price.
+    try {
+      if (
+        sellMintForRegistry &&
+        buyMintForRegistry &&
+        sellToken.amount &&
+        buyToken.amount &&
+        typeof sellToken.decimals === 'number' &&
+        typeof buyToken.decimals === 'number'
+      ) {
+        const approx = await computeApproxBuyPrice({
+          sellMint: sellMintForRegistry,
+          sellAmountRaw: sellToken.amount,
+          sellDecimals: sellToken.decimals,
+          buyAmountRaw: buyToken.amount,
+          buyDecimals: buyToken.decimals,
+        });
+        if (approx) {
+          await setPriceIfMissing({
+            mint: buyMintForRegistry,
+            price: approx.price,
+            priceInfoSource: approx.priceInfoSource,
+          });
+        }
+      }
+    } catch (priceErr) {
+      console.warn('[relay/writeback] approx price back-fill failed', priceErr);
+    }
 
     // Fetch sell token balance from MongoDB if missing
     if (!sellToken.balanceBefore && sellChainKey && sellToken.symbol) {

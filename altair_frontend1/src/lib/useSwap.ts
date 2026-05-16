@@ -294,27 +294,48 @@ export const useSwap = (explicitChain?: ChainKey) => {
         if (!sellTokenAddress) {
           throw new Error('Missing sell token address for approval');
         }
-        const erc20Approve = new ethers.Contract(
+        
+        // Check current allowance
+        const erc20 = new ethers.Contract(
           sellTokenAddress,
-          ['function approve(address,uint256)'],
+          ['function allowance(address,address) view returns (uint256)', 'function approve(address,uint256)'],
           managedSigner,
         );
-        const approveTx = await withWaitLogger(
+        
+        const currentAllowance = await withWaitLogger(
           {
             file: 'altair_frontend1/src/lib/useSwap.ts',
-            target: 'ERC20.approve',
-            description: 'token approval transaction submission',
+            target: 'ERC20.allowance',
+            description: 'check token allowance',
           },
-          () => erc20Approve.approve(methodParameters.to, ethers.MaxUint256)
+          () => erc20.allowance(recipient, methodParameters.to)
         );
-        await withWaitLogger(
-          {
-            file: 'altair_frontend1/src/lib/useSwap.ts',
-            target: 'ERC20.approve.wait',
-            description: 'token approval confirmation',
-          },
-          () => approveTx.wait()
-        );
+        
+        console.log('[useSwap] Current allowance:', currentAllowance.toString(), 'Required:', amountWei.toString());
+        
+        // Only approve if current allowance is insufficient
+        if (currentAllowance < amountWei) {
+          console.log('[useSwap] Insufficient allowance, requesting approval for MaxUint256');
+          const approveTx = await withWaitLogger(
+            {
+              file: 'altair_frontend1/src/lib/useSwap.ts',
+              target: 'ERC20.approve',
+              description: 'token approval transaction submission',
+            },
+            () => erc20.approve(methodParameters.to, ethers.MaxUint256)
+          );
+          await withWaitLogger(
+            {
+              file: 'altair_frontend1/src/lib/useSwap.ts',
+              target: 'ERC20.approve.wait',
+              description: 'token approval confirmation',
+            },
+            () => approveTx.wait()
+          );
+          console.log('[useSwap] Approval confirmed');
+        } else {
+          console.log('[useSwap] Sufficient allowance already exists, skipping approval');
+        }
       }
 
       const tx = await withWaitLogger(

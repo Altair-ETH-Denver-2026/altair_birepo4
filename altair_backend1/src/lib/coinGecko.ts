@@ -1,4 +1,4 @@
-import { COINGECKO_API } from '../../config/coinGecko_config';
+import { COINGECKO_API, resolveCoinGeckoEndpoint } from '../../config/coinGecko_config';
 import { withWaitLogger } from '@/lib/waitLogger';
 
 export interface CoinGeckoPriceEntry {
@@ -48,6 +48,7 @@ export async function fetchPricesForPlatform(params: {
   if (!apiKey) {
     throw new Error('Missing COINGECKO_API_KEY environment variable');
   }
+  const endpoint = resolveCoinGeckoEndpoint();
 
   const dedupedAddresses = Array.from(
     new Set(
@@ -66,7 +67,7 @@ export async function fetchPricesForPlatform(params: {
 
   for (let i = 0; i < chunks.length; i += 1) {
     const batch = chunks[i];
-    const url = new URL(`${COINGECKO_API.baseUrl}/simple/token_price/${encodeURIComponent(params.platform)}`);
+    const url = new URL(`${endpoint.baseUrl}/simple/token_price/${encodeURIComponent(params.platform)}`);
     url.searchParams.set('contract_addresses', batch.join(','));
     url.searchParams.set('vs_currencies', 'usd');
     url.searchParams.set('include_last_updated_at', 'true');
@@ -86,7 +87,7 @@ export async function fetchPricesForPlatform(params: {
             method: 'GET',
             headers: {
               accept: 'application/json',
-              'x-cg-pro-api-key': apiKey,
+              [endpoint.apiKeyHeader]: apiKey,
             },
             signal: controller.signal,
           })
@@ -103,11 +104,18 @@ export async function fetchPricesForPlatform(params: {
       }
 
       if (!response.ok) {
+        let body = '';
+        try {
+          body = await response.text();
+        } catch {
+          // ignore body-read failure; status alone is still useful
+        }
         console.warn('[coinGecko] non-200 from CoinGecko; skipping chunk', {
           platform: params.platform,
           status: response.status,
           chunkIndex: i,
           chunkSize: batch.length,
+          body: body.slice(0, 500),
         });
         continue;
       }
