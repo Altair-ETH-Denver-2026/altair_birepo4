@@ -226,7 +226,9 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
       paddingLeft: 8,
       paddingRight: 8
     }
-  }
+  },
+  tokenPrices: {},
+  balanceValues: {}
 };
 
 export const CHAIN_OPTIONS = {

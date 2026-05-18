@@ -110,8 +110,8 @@ export async function isTokenRecorded(mint: string, chain?: ChainKey): Promise<b
  * Any field passed as `null`/`undefined`/empty is omitted from the insert,
  * which keeps fake placeholder data (e.g. `decimals: 9`) out of the collection.
  *
- * `lastFetchedAt` is deliberately not set — it is owned by the price refresher
- * and signals "last successful price poll", not "last metadata write".
+ * `priceInfo.updatedAt` is seeded to `now` on insert (alongside `priceInfo.source`)
+ * so the global staleness signal works correctly for freshly-recorded tokens.
  */
 export async function recordTokenIfMissing(input: TokenRecordInput): Promise<{ created: boolean }> {
   if (!(input.chain in CHAINS)) {

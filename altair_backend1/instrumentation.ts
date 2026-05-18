@@ -44,7 +44,7 @@ export async function register() {
     .then((res) => {
       console.log('[instrumentation] boot staleness check', {
         triggered: res.triggered,
-        maxFetchedAt: res.maxFetchedAt,
+        maxPriceUpdatedAt: res.maxPriceUpdatedAt,
       });
     })
     .catch((err) => {

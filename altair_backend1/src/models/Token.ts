@@ -33,10 +33,6 @@ const TokenSchema = new Schema(
     tokenProgram: { type: String },
     jupUpdatedAt: { type: String },
     source: { type: String, default: 'jupiter', index: true },
-    // Owned exclusively by the price refresher; signals "last successful price poll".
-    // Defaults to null on newly-recorded tokens so the staleness signal stays valid
-    // (a freshly inserted token must not look like it was just polled).
-    lastFetchedAt: { type: Date, default: null },
     // Current last-known USD price for the token. `null` until the periodic price job runs.
     price: { type: Number, default: null, index: true },
     // Immediately prior price snapshot. Overwritten (not appended to) on each observed price change.

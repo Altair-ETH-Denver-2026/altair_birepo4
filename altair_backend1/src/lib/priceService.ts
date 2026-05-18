@@ -68,7 +68,7 @@ let refreshInFlight: Promise<RefreshAllTokenPricesResult> | null = null;
  *
  * Per-token write rules:
  *  - If CoinGecko returned the same `usd` value already stored → no price write,
- *    but `lastFetchedAt` is still bumped (batched) so staleness checks stay valid.
+ *    but `priceInfo.updatedAt` is still bumped (batched) so staleness checks stay valid.
  *  - Else `price` is updated and `priceInfo` is overwritten with the snapshot of
  *    the value being replaced (`null` on first-ever write).
  *
@@ -156,8 +156,8 @@ async function doRefreshAllTokenPrices(): Promise<RefreshAllTokenPricesResult> {
       continue;
     }
 
-    // Mints whose price was unchanged this poll — still want lastFetchedAt bumped
-    // so staleness checks don't false-positive into another fetch loop.
+    // Mints whose price was unchanged this poll — still want priceInfo.updatedAt
+    // bumped so staleness checks don't false-positive into another fetch loop.
     const skippedMints: string[] = [];
 
     for (const entry of entries) {
@@ -181,7 +181,6 @@ async function doRefreshAllTokenPrices(): Promise<RefreshAllTokenPricesResult> {
         const update = {
           $set: {
             price: entry.usd,
-            lastFetchedAt: now,
             priceInfo: { lastPrice: priorPrice, updatedAt: now, source: PRICE_SOURCE },
           },
         };
@@ -215,21 +214,27 @@ async function doRefreshAllTokenPrices(): Promise<RefreshAllTokenPricesResult> {
 
     if (skippedMints.length > 0) {
       try {
+        const now = new Date();
         await withWaitLogger(
           {
             file: 'altair_backend1/src/lib/priceService.ts',
             target: 'Token.updateMany',
-            description: `bump lastFetchedAt for ${skippedMints.length} unchanged tokens on ${chain}`,
+            description: `bump priceInfo.updatedAt for ${skippedMints.length} unchanged tokens on ${chain}`,
           },
           () =>
             Token.updateMany(
               { mint: { $in: skippedMints } },
-              { $set: { lastFetchedAt: new Date() } }
+              {
+                $set: {
+                  'priceInfo.updatedAt': now,
+                  'priceInfo.source': PRICE_SOURCE,
+                },
+              }
             )
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        console.error('[priceService] updateMany (skipped lastFetchedAt) failed', { chain, error: message });
+        console.error('[priceService] updateMany (skipped priceInfo.updatedAt) failed', { chain, error: message });
       }
     }
   }
@@ -245,40 +250,43 @@ async function doRefreshAllTokenPrices(): Promise<RefreshAllTokenPricesResult> {
 }
 
 /**
- * Most recent `lastFetchedAt` across the entire `tokens` collection, or null if
- * no token has ever been polled. Used as the staleness signal so we don't need a
- * dedicated "last successful run" canary doc.
+ * Most recent `priceInfo.updatedAt` across the entire `tokens` collection, or
+ * null if no token has a priceInfo subdoc yet. Used as the staleness signal so
+ * we don't need a dedicated "last successful run" canary doc.
  */
-export async function getMaxLastFetchedAt(): Promise<Date | null> {
+export async function getMaxPriceUpdatedAt(): Promise<Date | null> {
   await connectToDatabase();
   const doc = await withWaitLogger(
     {
       file: 'altair_backend1/src/lib/priceService.ts',
-      target: 'Token.findOne(lastFetchedAt)',
-      description: 'find newest lastFetchedAt across tokens',
+      target: 'Token.findOne(priceInfo.updatedAt)',
+      description: 'find newest priceInfo.updatedAt across tokens',
     },
     () =>
-      Token.findOne({ lastFetchedAt: { $ne: null } }, { lastFetchedAt: 1 })
-        .sort({ lastFetchedAt: -1 })
-        .lean<{ lastFetchedAt: Date } | null>()
+      Token.findOne(
+        { 'priceInfo.updatedAt': { $ne: null } },
+        { 'priceInfo.updatedAt': 1 }
+      )
+        .sort({ 'priceInfo.updatedAt': -1 })
+        .lean<{ priceInfo?: { updatedAt?: Date | null } | null } | null>()
   );
-  return doc?.lastFetchedAt ?? null;
+  return doc?.priceInfo?.updatedAt ?? null;
 }
 
 /**
- * True if the newest `lastFetchedAt` is older than the configured period (or if
- * nothing has been polled yet).
+ * True if the newest `priceInfo.updatedAt` is older than the configured period
+ * (or if nothing has been recorded yet).
  */
 export async function isPriceDataStale(): Promise<boolean> {
-  const maxFetchedAt = await getMaxLastFetchedAt();
-  if (!maxFetchedAt) return true;
+  const maxPriceUpdatedAt = await getMaxPriceUpdatedAt();
+  if (!maxPriceUpdatedAt) return true;
   const periodMs = PRICE_RULES.fetchAllConditions.periodically * 60_000;
-  return Date.now() - maxFetchedAt.getTime() > periodMs;
+  return Date.now() - maxPriceUpdatedAt.getTime() > periodMs;
 }
 
 export interface RefreshPricesIfStaleResult {
   triggered: boolean;
-  maxFetchedAt: Date | null;
+  maxPriceUpdatedAt: Date | null;
   result: RefreshAllTokenPricesResult | null;
 }
 
@@ -288,14 +296,14 @@ export interface RefreshPricesIfStaleResult {
  * the in-flight guard inside `refreshAllTokenPrices` collapses concurrent runs.
  */
 export async function refreshPricesIfStale(): Promise<RefreshPricesIfStaleResult> {
-  const maxFetchedAt = await getMaxLastFetchedAt();
+  const maxPriceUpdatedAt = await getMaxPriceUpdatedAt();
   const periodMs = PRICE_RULES.fetchAllConditions.periodically * 60_000;
-  const stale = !maxFetchedAt || Date.now() - maxFetchedAt.getTime() > periodMs;
+  const stale = !maxPriceUpdatedAt || Date.now() - maxPriceUpdatedAt.getTime() > periodMs;
 
   if (!stale) {
-    return { triggered: false, maxFetchedAt, result: null };
+    return { triggered: false, maxPriceUpdatedAt, result: null };
   }
 
   const result = await refreshAllTokenPrices();
-  return { triggered: true, maxFetchedAt, result };
+  return { triggered: true, maxPriceUpdatedAt, result };
 }

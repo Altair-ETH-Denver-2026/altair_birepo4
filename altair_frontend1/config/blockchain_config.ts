@@ -86,12 +86,12 @@ export const PRICE_RULES = {
 }
 
 export const DEFAULT_TOKENS = { // These are added when a user creates their account
-  ETH_MAINNET: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
-  ETH_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
-  BASE_MAINNET: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
-  BASE_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'USDC', 'DAI'],
-  SOLANA_MAINNET: ['SOL', 'WETH', 'WBTC', 'USDC', 'USDu'],
-  SOLANA_DEVNET: ['SOL', 'WETH', 'WBTC', 'USDC', 'USDu'],
+  ETH_MAINNET: ['ETH', 'WETH', 'WSOL', 'WBTC', 'USDC', 'DAI'],
+  ETH_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'WBTC', 'USDC', 'DAI'],
+  BASE_MAINNET: ['ETH', 'WETH', 'WSOL', 'WBTC', 'USDC', 'DAI'],
+  BASE_SEPOLIA: ['ETH', 'WETH', 'WSOL', 'WBTC', 'USDC', 'DAI'],
+  SOLANA_MAINNET: ['SOL', 'WSOL', 'WETH', 'WBTC', 'USDC', 'DAI'],
+  SOLANA_DEVNET: ['SOL', 'WSOL', 'WETH', 'WBTC', 'USDC', 'DAI'],
 };
 
 export const SWAP_PROVIDER_OPTIONS = {

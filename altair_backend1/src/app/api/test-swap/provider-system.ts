@@ -87,94 +87,72 @@ export function* createProviderAttemptIterator(
   chainKey: ChainKey
 ): Generator<ProviderAttemptContext, void, ProviderError | null> {
   const providers = getProvidersForChain(chainKey);
-  const maxAttemptsPerProvider = SWAP_PROVIDER_OPTIONS.maxAttemptsPerOption || 2;
-  const isInfinite = maxAttemptsPerProvider === 0;
+  const maxIterations = SWAP_PROVIDER_OPTIONS.maxAttemptsPerOption || 2;
+  const isInfinite = maxIterations === 0;
   
   let globalAttemptNumber = 0;
   let consecutiveFailures = 0;
   const maxConsecutiveFailures = 10; // Safety limit for infinite mode
   
-  let providerIndex = 0;
-  
   console.log(`[provider-system] Starting provider iteration with ${providers.length} providers: ${providers.join(', ')}`);
-  console.log(`[provider-system] maxAttemptsPerProvider: ${maxAttemptsPerProvider}, isInfinite: ${isInfinite}`);
+  console.log(`[provider-system] maxIterations (maxAttemptsPerOption): ${maxIterations}, isInfinite: ${isInfinite}`);
   
-  while (true) {
-    console.log(`[provider-system] Beginning provider loop iteration`);
+  // Iterate through the provider list maxIterations times
+  for (let iteration = 1; iteration <= (isInfinite ? 1 : maxIterations); iteration++) {
+    console.log(`[provider-system] Beginning iteration ${iteration}/${maxIterations} through provider list`);
     
     for (let i = 0; i < providers.length; i++) {
       const provider = providers[i];
-      providerIndex = i;
+      globalAttemptNumber++;
       
-      console.log(`[provider-system] Trying provider ${i + 1}/${providers.length}: ${provider}`);
-      
-      for (let attempt = 1; attempt <= (isInfinite ? 1 : maxAttemptsPerProvider); attempt++) {
-        globalAttemptNumber++;
-        
-        // Safety check for infinite mode
-        if (isInfinite && consecutiveFailures >= maxConsecutiveFailures) {
-          console.error('[provider-system] Max consecutive failures reached in infinite mode, stopping');
-          return;
-        }
-        
-        const totalAttempts = isInfinite ? Infinity : providers.length * maxAttemptsPerProvider;
-        const isLastProvider = i === providers.length - 1;
-        const isLastAttemptForProvider = attempt === maxAttemptsPerProvider;
-        const isLastAttempt = !isInfinite && isLastProvider && isLastAttemptForProvider;
-        
-        console.log(`[provider-system] Provider ${provider}, attempt ${attempt}/${maxAttemptsPerProvider}, global attempt ${globalAttemptNumber}, isLastAttempt: ${isLastAttempt}`);
-        
-        const context: ProviderAttemptContext = {
-          provider,
-          attemptNumber: globalAttemptNumber,
-          totalAttempts,
-          isLastAttempt,
-        };
-        
-        // Yield the attempt context and wait for result
-        console.log(`[provider-system] Yielding context for ${provider}`);
-        const result = yield context;
-        console.log(`[provider-system] Received result for ${provider}:`, result ? 'ERROR' : 'SUCCESS');
-        
-        // If no error (success), we're done
-        if (!result) {
-          console.log(`[provider-system] Success! Exiting iterator`);
-          return;
-        }
-        
-        // Handle error
-        consecutiveFailures++;
-        
-        // Determine if we should continue with this provider or move to next
-        if (shouldFallbackToNextProvider(result.error)) {
-          console.log(`[provider-system] Fallback triggered for ${provider}, breaking to next provider`);
-          break; // Move to next provider
-        }
-        
-        if (!shouldRetryWithSameProvider(result.error)) {
-          console.log(`[provider-system] Non-retryable error for ${provider}, breaking to next provider`);
-          break; // Move to next provider
-        }
-        
-        // If we're here, retry with same provider
-        console.log(`[provider-system] Retrying with ${provider} (attempt ${attempt + 1}/${maxAttemptsPerProvider})`);
-        
-        // If this was the last attempt for this provider, move to next
-        if (isLastAttemptForProvider) {
-          console.log(`[provider-system] Last attempt for ${provider}, breaking to next provider`);
-          break;
-        }
+      // Safety check for infinite mode
+      if (isInfinite && consecutiveFailures >= maxConsecutiveFailures) {
+        console.error('[provider-system] Max consecutive failures reached in infinite mode, stopping');
+        return;
       }
       
-      console.log(`[provider-system] Finished attempts for provider ${provider}, continuing to next provider`);
+      const totalAttempts = isInfinite ? Infinity : providers.length * maxIterations;
+      const isLastIteration = iteration === maxIterations;
+      const isLastProvider = i === providers.length - 1;
+      const isLastAttempt = !isInfinite && isLastIteration && isLastProvider;
+      
+      console.log(`[provider-system] Trying provider ${i + 1}/${providers.length}: ${provider} (iteration ${iteration}/${maxIterations}, global attempt ${globalAttemptNumber})`);
+      
+      const context: ProviderAttemptContext = {
+        provider,
+        attemptNumber: globalAttemptNumber,
+        totalAttempts,
+        isLastAttempt,
+      };
+      
+      // Yield the attempt context and wait for result
+      console.log(`[provider-system] Yielding context for ${provider}`);
+      const result = yield context;
+      console.log(`[provider-system] Received result for ${provider}:`, result ? 'ERROR' : 'SUCCESS');
+      
+      // If no error (success), we're done
+      if (!result) {
+        console.log(`[provider-system] Success! Exiting iterator`);
+        return;
+      }
+      
+      // Handle error
+      consecutiveFailures++;
+      console.log(`[provider-system] Attempt failed for ${provider}, continuing to next provider in list`);
     }
     
-    console.log(`[provider-system] Completed full provider loop, isInfinite: ${isInfinite}`);
+    console.log(`[provider-system] Completed iteration ${iteration}/${maxIterations} through provider list`);
     
-    // If we've exhausted all providers and we're not in infinite mode, stop
-    if (!isInfinite) {
-      console.log(`[provider-system] Not in infinite mode, exiting iterator after exhausting all providers`);
+    // If we've exhausted all iterations and we're not in infinite mode, stop
+    if (!isInfinite && iteration === maxIterations) {
+      console.log(`[provider-system] Exhausted all ${maxIterations} iterations through provider list, exiting iterator`);
       return;
+    }
+    
+    // In infinite mode, loop continues indefinitely
+    if (isInfinite) {
+      console.log(`[provider-system] Infinite mode: restarting provider list iteration`);
+      iteration = 0; // Reset to continue infinite loop
     }
   }
 }

@@ -76,7 +76,11 @@ const seedOneChain = async (source: SeedSourceEntry): Promise<SeedCounts> => {
           name,
           decimals,
           source: 'token_info',
-          lastFetchedAt: new Date(),
+          priceInfo: {
+            lastPrice: null,
+            updatedAt: new Date(),
+            source: 'token_info',
+          },
         },
       },
       { upsert: true }
