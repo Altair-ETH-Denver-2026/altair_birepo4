@@ -156,5 +156,5 @@ export const DAI = {
   symbol: 'DAI',
   name: 'Wrapped DAI (Wormhole)',
   address: 'EjmyN6qEC1Tf1JxiG1ae7UTJhUxSwk1TCWNWqxWV4J6o',
-  decimals: 9,
+  decimals: 8,
 };

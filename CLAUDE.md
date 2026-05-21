@@ -16,5 +16,5 @@ Our app uses a 2 repository paradigm. The absolute top-most folder contains the 
 
 1. **Config Paradigm**: Every literal value (strings, URLs, colors, flags) lives in config/*.ts. Nothing is hardcoded in components. To add a value: add it to the correct config file → export it → import it at the usage site.
 2. **Responsive**: Every section must look correct on mobile and desktop. Mobile-first, Tailwind breakpoints only.
-6. **`docs/dev_notes`**: Documentation about the site lives in `docs/dev_notes`. Read these files to understand the site.
-7. **`docs/dev_notes/Plans`**: This documentation folder contains development plans for creating or improving the site.
+3. **`docs/dev_notes`**: Documentation about the site lives in `docs/dev_notes`. Read these files to understand the site.
+4. **`docs/dev_notes/Plans`**: This documentation folder contains development plans for creating or improving the site.

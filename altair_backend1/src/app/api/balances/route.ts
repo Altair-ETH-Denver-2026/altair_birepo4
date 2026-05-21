@@ -25,6 +25,7 @@ import {
 import { getUserUIDFromAccessTokenByMode } from '@/lib/users';
 import { formatAmountFromRaw } from '@/lib/amounts';
 import { buildCorsHeaders } from '@/lib/appUrls';
+import { attachPricesToTokens } from '@/lib/priceLookup';
 
 const ERC20_BALANCE_ABI = [
   {
@@ -92,6 +93,20 @@ const chainInfoByKey = {
   SOLANA_MAINNET,
   SOLANA_DEVNET,
 } as const;
+
+const enrichWithPrices = async (
+  chain: ChainKey,
+  tokens: Record<string, ApiTokenBalance>
+): Promise<void> => {
+  try {
+    await attachPricesToTokens(chain, tokens);
+  } catch (err) {
+    console.warn('[balances] attachPricesToTokens failed', {
+      chain,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+};
 
 const isSolanaChain = (chainKey: ChainKey) =>
   chainKey === 'SOLANA_MAINNET' || chainKey === 'SOLANA_DEVNET';
@@ -835,12 +850,25 @@ export async function POST(req: Request) {
           })();
         }
 
+        // Attach prices once per chain. `selectedPayload` either points at one
+        // of the same `tokens` references inside `allChainsPayload` (shared by
+        // identity, so this enrich covers it) or to a freshly built fallback
+        // payload — we enrich that fallback after the fact.
+        await Promise.all(
+          (Object.entries(allChainsPayload) as Array<[ChainKey, ApiBalancesResponse]>).map(
+            ([chainKey, chainPayload]) => enrichWithPrices(chainKey, chainPayload.tokens)
+          )
+        );
+
         const selectedPayload = allChainsPayload[resolvedChainKey]
           ?? fromMongoToPayload({
             chain: resolvedChainKey,
             address: walletAddress,
             mongoBalances: {},
           });
+        if (!allChainsPayload[resolvedChainKey]) {
+          await enrichWithPrices(resolvedChainKey, selectedPayload.tokens);
+        }
 
         return {
           ...selectedPayload,
@@ -869,6 +897,7 @@ export async function POST(req: Request) {
         address: walletAddress,
         mongoBalances,
       });
+      await enrichWithPrices(resolvedChainKey, immediatePayload.tokens);
 
       if (uid && !shouldSkipAsyncVerification) {
         // Check if balances need verification based on staleness
@@ -954,6 +983,7 @@ export async function POST(req: Request) {
       address: walletAddress,
       balances: blockchainBalances,
     });
+    await enrichWithPrices(resolvedChainKey, payload.tokens);
 
     return NextResponse.json(payload, withCors());
   } catch (error) {

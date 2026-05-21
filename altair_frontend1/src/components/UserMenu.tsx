@@ -92,7 +92,7 @@ export default function UserMenu() {
   balancesByChainRef.current = balancesByChain;
   const executeSwap = useSwap(selectedChain);
   const executeSolanaSwap = useSolanaSwap(selectedChain);
-  const executeSolanaTransfer = useSolanaTransfer(selectedChain);
+  const executeSolanaTransfer = useSolanaTransfer();
   const menuRef = useRef<HTMLDivElement>(null);
   const isWalletDropDown = WALLET_DISPLAY.active === 'drop_down';
   const isWalletPanel = WALLET_DISPLAY.active === 'panel';
@@ -119,10 +119,31 @@ export default function UserMenu() {
   const tokenSymbolFontSize = tokenSymbolsConfig.fontSize * buttonSize;
   const tokenSymbolFontFamily = tokenSymbolsConfig.fontName;
   const tokenSymbolColor = tokenSymbolsConfig.color;
+  const tokenSymbolPaddingBottom = Number(
+    (tokenSymbolsConfig as unknown as { paddingBottom?: number }).paddingBottom ?? 0
+  );
+  const tokenSymbolLineHeight = Number(
+    (tokenSymbolsConfig as unknown as { lineHeight?: number }).lineHeight ?? 1
+  );
   const tokenBalanceFontSize = tokenBalancesConfig.fontSize * buttonSize;
   const tokenBalanceFontFamily = tokenBalancesConfig.fontName;
   const tokenBalanceColor = tokenBalancesConfig.color;
   const tokenBalanceDecimals = tokenBalancesConfig.decimals;
+  const tokenPricesConfig = WALLET_DISPLAY.tokenPrices;
+  const tokenPriceFontSize = Number(tokenPricesConfig.fontSize ?? 11) * buttonSize;
+  const tokenPriceFontFamily = tokenPricesConfig.fontName ?? 'sans-serif';
+  const tokenPriceColor = tokenPricesConfig.color ?? '#9ca3af';
+  const tokenPriceDecimals = Number(tokenPricesConfig.decimals ?? 4);
+  const tokenPricePaddingTop = Number(tokenPricesConfig.paddingTop ?? 1);
+  const tokenPriceLineHeight = Number(
+    (tokenPricesConfig as unknown as { lineHeight?: number }).lineHeight ?? 1
+  );
+  const balanceValuesConfig = WALLET_DISPLAY.balanceValues;
+  const balanceValueFontSize = Number(balanceValuesConfig.fontSize ?? 11) * buttonSize;
+  const balanceValueFontFamily = balanceValuesConfig.fontName ?? 'sans-serif';
+  const balanceValueColor = balanceValuesConfig.color ?? '#9ca3af';
+  const balanceValueDecimals = Number(balanceValuesConfig.decimals ?? 2);
+  const balanceValuePaddingLeft = Number(balanceValuesConfig.paddingLeft ?? 6);
   const tokenIconSize = Number(tokenIconsConfig.size) * buttonSize;
   const tokenIconFileType = tokenIconsConfig.fileType;
   const tokenIconFileSize = tokenIconsConfig.fileSize;
@@ -2018,10 +2039,70 @@ export default function UserMenu() {
     pointerEvents: 'none',
   };
 
+  const resolveTokenPriceForSymbol = (chainKey: ChainKey | 'ALL', symbol: string): number | null => {
+    const normalized = symbol.trim().toUpperCase();
+    if (chainKey === 'ALL') {
+      for (const [chain, balances] of Object.entries(balancesByChain)) {
+        if (chain === 'ETH_SEPOLIA' || chain === 'BASE_SEPOLIA') continue;
+        const p = balances?.tokens?.[normalized]?.price;
+        if (typeof p === 'number' && Number.isFinite(p)) return p;
+      }
+      return null;
+    }
+    const p = balancesByChain[chainKey as ChainKey]?.tokens?.[normalized]?.price;
+    return typeof p === 'number' && Number.isFinite(p) ? p : null;
+  };
+
+  const resolveTokenDollarValueForSymbol = (
+    chainKey: ChainKey | 'ALL',
+    symbol: string
+  ): number | null => {
+    const normalized = symbol.trim().toUpperCase();
+    if (chainKey === 'ALL') {
+      let total = 0;
+      let anyFound = false;
+      for (const [chain, balances] of Object.entries(balancesByChain)) {
+        if (chain === 'ETH_SEPOLIA' || chain === 'BASE_SEPOLIA') continue;
+        const token = balances?.tokens?.[normalized];
+        if (!token) continue;
+        const balanceNum = parseFloat(token.balance ?? '0');
+        const price = typeof token.price === 'number' && Number.isFinite(token.price) ? token.price : null;
+        if (!isNaN(balanceNum) && price !== null) {
+          total += balanceNum * price;
+          anyFound = true;
+        }
+      }
+      return anyFound ? total : null;
+    }
+    const token = balancesByChain[chainKey as ChainKey]?.tokens?.[normalized];
+    if (!token) return null;
+    const balanceNum = parseFloat(token.balance ?? '0');
+    const price = typeof token.price === 'number' && Number.isFinite(token.price) ? token.price : null;
+    if (price === null || isNaN(balanceNum)) return null;
+    return balanceNum * price;
+  };
+
+  // USD values are truncated (not rounded) to `decimals` places so the visible
+  // figure never overstates the underlying amount — e.g. $3.149 renders $3.14,
+  // not $3.15.
+  const formatUsd = (value: number, decimals: number): string => {
+    const factor = Math.pow(10, decimals);
+    const truncated = Math.trunc(value * factor) / factor;
+    return (
+      '$' +
+      truncated.toLocaleString('en-US', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      })
+    );
+  };
+
   const renderBalances = (chainKey: ChainKey | 'ALL') => {
     const rows = resolveTokenRows(chainKey);
     return rows.map((symbol, index) => {
       const balanceValue = resolveBalanceForSymbol(chainKey, symbol);
+      const tokenPrice = resolveTokenPriceForSymbol(chainKey, symbol);
+      const dollarValue = resolveTokenDollarValueForSymbol(chainKey, symbol);
       const iconSrc = resolveTokenIconSrc(symbol);
       return (
         <React.Fragment key={symbol}>
@@ -2072,16 +2153,32 @@ export default function UserMenu() {
                 <span style={questionMarkStyle}>?</span>
               )}
             </div>
-            <span
-              className="flex-1"
-              style={{
-                fontSize: `${tokenSymbolFontSize}px`,
-                fontFamily: tokenSymbolFontFamily,
-                color: tokenSymbolColor,
-              }}
-            >
-              {symbol}
-            </span>
+            <div className="flex flex-1 flex-col">
+              <span
+                style={{
+                  fontSize: `${tokenSymbolFontSize}px`,
+                  fontFamily: tokenSymbolFontFamily,
+                  color: tokenSymbolColor,
+                  lineHeight: tokenSymbolLineHeight,
+                  paddingBottom: `${tokenSymbolPaddingBottom}px`,
+                }}
+              >
+                {symbol}
+              </span>
+              {tokenPrice !== null ? (
+                <span
+                  style={{
+                    fontSize: `${tokenPriceFontSize}px`,
+                    fontFamily: tokenPriceFontFamily,
+                    color: tokenPriceColor,
+                    lineHeight: tokenPriceLineHeight,
+                    paddingTop: `${tokenPricePaddingTop}px`,
+                  }}
+                >
+                  {formatUsd(tokenPrice, tokenPriceDecimals)}
+                </span>
+              ) : null}
+            </div>
             <span
               className="px-3 text-center whitespace-nowrap hover:whitespace-normal"
               style={{
@@ -2097,6 +2194,19 @@ export default function UserMenu() {
                 ? balanceValue
                 : Number(balanceValue).toFixed(tokenBalanceDecimals)}
             </span>
+            {dollarValue !== null ? (
+              <span
+                className="whitespace-nowrap"
+                style={{
+                  fontSize: `${balanceValueFontSize}px`,
+                  fontFamily: balanceValueFontFamily,
+                  color: balanceValueColor,
+                  paddingLeft: `${balanceValuePaddingLeft}px`,
+                }}
+              >
+                {formatUsd(dollarValue, balanceValueDecimals)}
+              </span>
+            ) : null}
           </div>
           {index < rows.length - 1 ? <div className="h-[1px] bg-gray-700 w-full" /> : null}
         </React.Fragment>

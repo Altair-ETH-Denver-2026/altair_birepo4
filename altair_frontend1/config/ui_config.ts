@@ -78,19 +78,21 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
   buttonActiveBorderColor: '#60a5fa', // Active top-row button border (border-blue-400) in UserMenu.tsx
   buttonSize: 1, // Global wallet size scalar in UserMenu.tsx
   rows: { // Token row vertical padding config used in renderBalances in UserMenu.tsx
-    paddingTop: 6, // Top padding per token row in UserMenu.tsx
-    paddingBottom: 6, // Bottom padding per token row in UserMenu.tsx
+    paddingTop: 5, // Top padding per token row in UserMenu.tsx
+    paddingBottom: 5, // Bottom padding per token row in UserMenu.tsx
   },
   tokenSymbols: { // Token symbol typography in renderBalances in UserMenu.tsx
-    fontSize: 14, // Token symbol font size in UserMenu.tsx
+    fontSize: 13, // Token symbol font size in UserMenu.tsx
     fontName: 'sans-serif', // Token symbol font family in UserMenu.tsx
-    color: '#d1d5db', // Token symbol color in UserMenu.tsx
+    color: '#ffffff', // Token symbol color in UserMenu.tsx
+    lineHeight: 1.2, // Unitless line-height; <1 lets the line box hug the glyph, removing residual leading
+    paddingBottom: 0, // Bottom padding between symbol and the price beneath it in UserMenu.tsx
   },
   tokenBalances: { // Token balance typography and precision in renderBalances in UserMenu.tsx
-    fontSize: 14, // Token balance font size in UserMenu.tsx
+    fontSize: 15, // Token balance font size in UserMenu.tsx
     fontName: 'sans-serif', // Token balance font family in UserMenu.tsx
     color: '#f3f4f6', // Token balance color in UserMenu.tsx
-    decimals: 8, // Token balance decimal precision in UserMenu.tsx
+    decimals: 6, // Token balance decimal precision in UserMenu.tsx
   },
   tokenIcons: { // Token icon config used in renderBalances in UserMenu.tsx
     fileType: 'webp', // Image file extension in UserMenu.tsx
@@ -227,8 +229,21 @@ export const WALLET_DISPLAY = { // Wallet panel/dropdown sizing and typography c
       paddingRight: 8
     }
   },
-  tokenPrices: {},
-  balanceValues: {}
+  tokenPrices: { // USD price shown below each token symbol in renderBalances in UserMenu.tsx
+    fontSize: 11, // Token price font size in UserMenu.tsx
+    fontName: 'sans-serif', // Token price font family in UserMenu.tsx
+    color: '#8f96a0', // Token price color in UserMenu.tsx
+    decimals: 2, // Token price decimal precision in UserMenu.tsx
+    lineHeight: 1, // Unitless line-height; <1 lets the line box hug the glyph, removing residual leading
+    paddingTop: 2, // Top padding between symbol and price in UserMenu.tsx
+  },
+  balanceValues: { // USD value of the user's balance shown to the right of each balance in renderBalances in UserMenu.tsx
+    fontSize: 11, // Balance dollar-value font size in UserMenu.tsx
+    fontName: 'sans-serif', // Balance dollar-value font family in UserMenu.tsx
+    color: '#8f96a0', // Balance dollar-value color in UserMenu.tsx
+    decimals: 2, // Balance dollar-value decimal precision in UserMenu.tsx
+    paddingLeft: 12, // Left padding separating dollar value from balance in UserMenu.tsx
+  },
 };
 
 export const CHAIN_OPTIONS = {

@@ -1388,7 +1388,7 @@ async function execute0xV2Swap(params: ZeroXV2SwapParams): Promise<ZeroXSwapResu
 
 export async function POST(req: Request) {
   try {
-    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody, balanceSnapshots } = (await req
+    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody, balanceSnapshots, integratorFee } = (await req
       .json()
       .catch(() => ({
         chain: null,
@@ -1400,6 +1400,7 @@ export async function POST(req: Request) {
         CID: null,
         provider: null,
         balanceSnapshots: null,
+        integratorFee: null,
       }))) as {
       chain?: ChainKey | null;
       buyToken?: string | null;
@@ -1416,6 +1417,7 @@ export async function POST(req: Request) {
         gasTokenSymbol?: string | null;
         gasTokenDecimals?: number | null;
       } | null;
+      integratorFee?: { token: string; amount: string; type: string } | null;
     };
 
     const resolvedChainKey: ChainKey =
@@ -2141,10 +2143,13 @@ export async function POST(req: Request) {
           }
         }
 
-        // --- Extract Altair fee from EVM transaction receipt ---
-        // 0x deducts the fee from the swap output and transfers it to the feeRecipient
-        // address via an ERC-20 Transfer event. We parse the tx receipt logs to find
-        // Transfer events where the `to` address matches the feeRecipient.
+        // --- Extract Altair fee from EVM transaction ---
+        // Priority 1: Use integratorFee from the 0x quote response (passed through frontend).
+        //   This works for ALL buy tokens, including ETH (native token), because 0x reports
+        //   the fee amount directly. ETH transfers don't emit ERC-20 Transfer events, so
+        //   receipt log parsing (Priority 2) cannot detect fees paid in ETH.
+        // Priority 2: Parse ERC-20 Transfer events from the tx receipt logs (only works for
+        //   ERC-20 buy tokens).
         // The fee config is resolved here (not from the outer scope) because the writeback
         // section runs before the EVM fee resolution block in the quote path.
         if (!isSolana) {
@@ -2152,11 +2157,42 @@ export async function POST(req: Request) {
             const writebackFeePct = resolveFeePct({ action: 'singleChainSwap', platform: '0x', chainType: 'EVM' });
             const writebackFeeRecipient = resolveFeeRecipient(resolvedChainKey);
             if (writebackFeePct !== null && writebackFeePct > 0 && writebackFeeRecipient !== null) {
-              // --- Extract Altair fee from EVM transaction receipt ---
-              // Note: This only works for ERC-20 buy tokens. ETH transfers don't emit
-              // Transfer events, so fees paid in ETH cannot be extracted from the receipt.
-              // For ETH buy tokens, the fee will not be recorded in the writeback path.
               if (resolvedAltairFee === null) {
+                // Priority 1: Use integratorFee from the 0x quote response (passed via frontend)
+                if (integratorFee && typeof integratorFee === 'object' && integratorFee.amount) {
+                  const feeAmount = BigInt(integratorFee.amount);
+                  if (feeAmount > 0n) {
+                    // Resolve the fee token symbol and decimals from the token config
+                    const feeTokenAddress = integratorFee.token?.toLowerCase() ?? '';
+                    let feeSymbol = feeTokenAddress;
+                    let feeDecimals = 18;
+                    if (feeTokenAddress === ZEROX_ETH_PLACEHOLDER.toLowerCase()) {
+                      feeSymbol = 'ETH';
+                      feeDecimals = 18;
+                    } else {
+                      // Look up the fee token address in tokenConfig (symbol -> { address, decimals })
+                      for (const [symbol, info] of Object.entries(tokenConfig)) {
+                        if (info.address?.toLowerCase() === feeTokenAddress) {
+                          feeSymbol = symbol;
+                          feeDecimals = info.decimals ?? 18;
+                          break;
+                        }
+                      }
+                    }
+                    resolvedAltairFee = {
+                      token: feeSymbol,
+                      amount: integratorFee.amount,
+                      decimals: feeDecimals,
+                      bps: pctToBps(writebackFeePct),
+                    };
+                    console.log('[test-swap] Resolved Altair fee from 0x integratorFee:', resolvedAltairFee);
+                  }
+                }
+              }
+              if (resolvedAltairFee === null) {
+                // Priority 2: Parse ERC-20 Transfer events from tx receipt logs
+                // Note: This only works for ERC-20 buy tokens. ETH transfers don't emit
+                // Transfer events, so fees paid in ETH cannot be extracted from the receipt.
                 const evmReceipt = buyAmountResult.evmReceipt ?? null;
                 if (evmReceipt && Array.isArray(evmReceipt.logs) && evmReceipt.logs.length > 0) {
                   const feeRecipientLower = writebackFeeRecipient.toLowerCase();
@@ -2872,6 +2908,7 @@ export async function POST(req: Request) {
       chainRpcCandidates: result.chainRpcCandidates,
       sellTokenAddress: result.sellTokenAddress,
       buyTokenAddress: result.buyTokenAddress,
+      integratorFee: result.integratorFee ?? null,
     };
     return NextResponse.json(responseBody);
   } catch (error) {

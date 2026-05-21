@@ -281,6 +281,7 @@ export const useSwap = (explicitChain?: ChainKey) => {
       const routePayload = (await routeResponse.json()) as {
         methodParameters?: { to: string; calldata: string; value: string };
         sellTokenAddress?: string;
+        integratorFee?: { token: string; amount: string; type: string } | null;
       };
 
       if (!routePayload.methodParameters) {
@@ -405,6 +406,7 @@ export const useSwap = (explicitChain?: ChainKey) => {
               recipient,
               CID: CID ?? null,
               txHash: tx.hash,
+              integratorFee: routePayload.integratorFee ?? null,
               balanceSnapshots: {
                 sellTokenBeforeRaw: sellSnapshot.raw,
                 buyTokenBeforeRaw: buySnapshot.raw,
