@@ -4,7 +4,11 @@
       "Bash(npx tsc *)",
       "Bash(echo \"exit=$?\")",
       "Bash(npx eslint *)",
-      "Bash(yarn tsc *)"
+      "Bash(yarn tsc *)",
+      "Bash(yarn typecheck *)",
+      "Bash(wait %1)",
+      "Read(//tmp/**)",
+      "Bash(yarn add *)"
     ]
   }
 }

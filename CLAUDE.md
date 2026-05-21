@@ -18,3 +18,4 @@ Our app uses a 2 repository paradigm. The absolute top-most folder contains the 
 2. **Responsive**: Every section must look correct on mobile and desktop. Mobile-first, Tailwind breakpoints only.
 3. **`docs/dev_notes`**: Documentation about the site lives in `docs/dev_notes`. Read these files to understand the site.
 4. **`docs/dev_notes/Plans`**: This documentation folder contains development plans for creating or improving the site.
+5. Always update `altair_frontend1\src\app\sitemap.ts` with new public routes when we add them.

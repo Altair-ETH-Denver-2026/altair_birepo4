@@ -2862,7 +2862,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Use provider fallback system to iterate through available providers
+    // Execute swap with the explicitly requested provider (frontend controls retry logic)
     const swapParams = {
       resolvedChainKey,
       chainConfig,
@@ -2882,20 +2882,24 @@ export async function POST(req: Request) {
       resolvedEvmBuyToken,
     };
 
-    const result = await executeWithProviderFallback<ZeroXSwapResult>(
-      resolvedChainKey,
-      async (context) => {
-        console.log(`[test-swap] Attempting ${context.provider} (attempt ${context.attemptNumber})`);
-
-        if (context.provider === '0x v1') {
-          return await execute0xV1Swap(swapParams);
-        } else if (context.provider === '0x v2') {
-          return await execute0xV2Swap(swapParams);
-        } else {
-          throw new Error(`Unknown provider: ${context.provider}`);
-        }
-      }
-    );
+    // Use the provider specified in the request, default to '0x v2'
+    const requestedProvider = typeof providerFromBody === 'string' && providerFromBody.trim().length > 0
+      ? providerFromBody.trim()
+      : '0x v2';
+    
+    console.log(`[test-swap] Using provider: ${requestedProvider}`);
+    
+    let result: ZeroXSwapResult;
+    if (requestedProvider === '0x v1') {
+      result = await execute0xV1Swap(swapParams);
+    } else if (requestedProvider === '0x v2') {
+      result = await execute0xV2Swap(swapParams);
+    } else {
+      return NextResponse.json(
+        { error: `Unknown provider: ${requestedProvider}` },
+        { status: 400 }
+      );
+    }
 
     // Update resolvedProviderFee if the provider returned one
     if (result.providerFee) {
