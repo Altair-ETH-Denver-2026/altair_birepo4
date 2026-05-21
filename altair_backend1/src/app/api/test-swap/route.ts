@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { ethers } from 'ethers';
 import { Connection, PublicKey, VersionedTransactionResponse } from '@solana/web3.js';
-import { BLOCKCHAIN, CHAINS, GAS_TOKENS, type ChainKey } from '../../../../config/blockchain_config';
+import { BLOCKCHAIN, CHAINS, GAS_TOKENS, SWAP_PROVIDER_OPTIONS, type ChainKey } from '../../../../config/blockchain_config';
 import {
   BASE_MAINNET,
   BASE_SEPOLIA,
@@ -19,6 +19,8 @@ import * as EthSepoliaTokens from '../../../../config/token_info/eth_sepolia_tes
 import * as SolanaTokens from '../../../../config/token_info/solana_tokens';
 import { pickBestMatch, searchJupiterTokens } from '@/lib/jupTokens';
 import { Token } from '@/models/Token';
+import { isTokenRecorded, recordTokenIfMissing, buildEvmNativeMint } from '@/lib/tokenRegistry';
+import { computeApproxBuyPrice, setPriceIfMissing } from '@/lib/priceMath';
 import { appendSwapToHistory } from '@/lib/zg-storage';
 import { connectToDatabase } from '@/lib/db';
 import { syncUserFromAccessToken } from '@/lib/users';
@@ -29,6 +31,7 @@ import {
   resolveReferralAccount,
   resolveFeeRecipient,
   pctToBps,
+  computeFeeAmount,
 } from '@/lib/feeResolver';
 import { Swap } from '@/models/Swap';
 import { Chat } from '@/models/Chat';
@@ -43,10 +46,29 @@ import {
   normalizeEvmAddress,
   searchAlchemyTokenAddressesBySymbol,
 } from '@/lib/alchemyTokens';
+import {
+  type SwapProvider,
+  type ProviderAttemptContext,
+  executeWithProviderFallback,
+  shouldFallbackToNextProvider,
+} from './provider-system';
 
 type TokenInfo = { address: string; decimals: number; symbol?: string };
 
 type JupiterTokenInfo = { address: string; decimals: number; symbol?: string };
+
+type ChainInfo = {
+  name: string;
+  isTestnet: boolean;
+  chainId: number;
+  rpcUrls: string[];
+  explorerUrl: string;
+  uniswapAddresses?: {
+    router: string;
+    factory: string;
+    swapRouter: string;
+  };
+};
 
 type ResolvedEvmToken = {
   address: string;
@@ -238,30 +260,26 @@ const findEvmTokensInCache = async (params: {
     .filter((entry): entry is ResolvedEvmToken => Boolean(entry));
 };
 
+/**
+ * Records an EVM token in the `tokens` collection. Delegates to the registry,
+ * which stores the address (lowercased) as the `mint` field — matching what
+ * the price refresher expects when querying CoinGecko by contract address. The
+ * legacy compound-key (`chainId:address`) format is no longer written.
+ */
 const saveEvmTokenToCache = async (params: {
   chainKey: ChainKey;
   token: ResolvedEvmToken;
 }) => {
-  const chainId = EVM_CHAIN_IDS[params.chainKey];
-  if (!chainId) return;
-  await connectToDatabase();
-  const cacheKey = buildEvmTokenCacheKey(chainId, params.token.address);
-  await Token.updateOne(
-    { mint: cacheKey },
-    {
-      $set: {
-        mint: cacheKey,
-        chain: resolveChainLabel(params.chainKey),
-        chainId: String(chainId),
-        symbol: params.token.symbol,
-        name: params.token.name ?? null,
-        decimals: params.token.decimals,
-        source: params.token.source,
-        lastFetchedAt: new Date(),
-      },
-    },
-    { upsert: true }
-  );
+  const source: 'config' | 'alchemy' =
+    params.token.source === 'config' ? 'config' : 'alchemy';
+  await recordTokenIfMissing({
+    mint: params.token.address,
+    chain: params.chainKey,
+    symbol: params.token.symbol ?? null,
+    name: params.token.name ?? null,
+    decimals: typeof params.token.decimals === 'number' ? params.token.decimals : null,
+    source,
+  });
 };
 
 const resolveEvmToken = async (params: {
@@ -276,6 +294,17 @@ const resolveEvmToken = async (params: {
 
   if (!normalizedInput) return { kind: 'unresolved' };
   if (normalizedSymbol === 'ETH') {
+    // Record the native-ETH row under a synthetic chain-distinct mint so it has
+    // a stable presence in `tokens`. The ResolvedEvmToken returned downstream
+    // keeps `address: ZEROX_ETH_PLACEHOLDER` because the 0x/Uniswap quote builders
+    // expect that sentinel; the registry write is independent of that sentinel.
+    await recordTokenIfMissing({
+      mint: buildEvmNativeMint(chainKey),
+      chain: chainKey,
+      symbol: 'ETH',
+      decimals: 18,
+      source: 'config',
+    });
     return {
       kind: 'resolved',
       token: {
@@ -289,11 +318,20 @@ const resolveEvmToken = async (params: {
 
   const configured = tokenConfig[normalizedSymbol];
   if (configured?.address && typeof configured.decimals === 'number') {
+    const resolvedAddress = normalizeEvmAddress(configured.address);
+    const resolvedSymbol = (configured.symbol ?? normalizedSymbol).toUpperCase();
+    await recordTokenIfMissing({
+      mint: resolvedAddress,
+      chain: chainKey,
+      symbol: resolvedSymbol,
+      decimals: configured.decimals,
+      source: 'config',
+    });
     return {
       kind: 'resolved',
       token: {
-        address: normalizeEvmAddress(configured.address),
-        symbol: (configured.symbol ?? normalizedSymbol).toUpperCase(),
+        address: resolvedAddress,
+        symbol: resolvedSymbol,
         decimals: configured.decimals,
         source: 'config',
       },
@@ -477,11 +515,12 @@ const getEthBalanceWithRetry = async (
   provider: ethers.JsonRpcProvider,
   address: string,
   blockNumber: number | 'latest' | null,
-  label: string
+  label: string,
+  allowBlockFallback: boolean = false
 ): Promise<bigint | null> => {
   const maxRetries = 2;
   const fallbackBlockNumbers = blockNumber !== null && typeof blockNumber === 'number'
-    ? [blockNumber, blockNumber - 1, 'latest']
+    ? (allowBlockFallback ? [blockNumber, blockNumber - 1, 'latest'] : [blockNumber, 'latest'])
     : ['latest'];
   
   for (const block of fallbackBlockNumbers) {
@@ -578,13 +617,38 @@ const resolveBuyAmount = async (params: {
     };
     const tokenConfig = applyTokenEnvOverrides(chainKey, tokenConfigs[chainKey]);
     const normalizedBuy = buyToken.toUpperCase();
-    let buyTokenInfo = normalizedBuy === 'SOL'
-      ? { mint: tokenConfig.SOL.address, decimals: tokenConfig.SOL.decimals }
-      : tokenConfig[normalizedBuy]
-        ? { mint: tokenConfig[normalizedBuy].address, decimals: tokenConfig[normalizedBuy].decimals }
-        : isSolanaMint(normalizedBuy)
-          ? { mint: normalizedBuy, decimals: 9 }
-          : null;
+    let buyTokenInfo: { mint: string; decimals: number } | null;
+    if (normalizedBuy === 'SOL') {
+      buyTokenInfo = { mint: tokenConfig.SOL.address, decimals: tokenConfig.SOL.decimals };
+      await recordTokenIfMissing({
+        mint: tokenConfig.SOL.address,
+        chain: 'SOLANA_MAINNET',
+        symbol: 'SOL',
+        decimals: tokenConfig.SOL.decimals,
+        source: 'config',
+      });
+    } else if (tokenConfig[normalizedBuy]) {
+      const conf = tokenConfig[normalizedBuy];
+      buyTokenInfo = { mint: conf.address, decimals: conf.decimals };
+      await recordTokenIfMissing({
+        mint: conf.address,
+        chain: 'SOLANA_MAINNET',
+        symbol: conf.symbol ?? normalizedBuy,
+        decimals: conf.decimals,
+        source: 'config',
+      });
+    } else if (isSolanaMint(normalizedBuy)) {
+      // In-memory `decimals: 9` is a swap-math fallback only; the registry
+      // write below omits decimals so we never persist the placeholder.
+      buyTokenInfo = { mint: normalizedBuy, decimals: 9 };
+      await recordTokenIfMissing({
+        mint: normalizedBuy,
+        chain: 'SOLANA_MAINNET',
+        source: 'mint-only',
+      });
+    } else {
+      buyTokenInfo = null;
+    }
     if (!buyTokenInfo?.mint) {
       const jupiterToken = await withWaitLogger(
         {
@@ -714,11 +778,11 @@ const resolveBuyAmount = async (params: {
     
     // If startBalance not provided or parsing failed, try blockchain lookup with retry
     if (startBalance === null) {
-      startBalance = await getEthBalanceWithRetry(provider, recipient, receipt.blockNumber - 1, 'startBalance');
+      startBalance = await getEthBalanceWithRetry(provider, recipient, receipt.blockNumber - 1, 'startBalance', true);
     }
-    
+
     // Get endBalance with retry
-    endBalance = await getEthBalanceWithRetry(provider, recipient, receipt.blockNumber, 'endBalance');
+    endBalance = await getEthBalanceWithRetry(provider, recipient, receipt.blockNumber, 'endBalance', false);
     
     // Prefer the pre-computed gasCostRaw (passed in from resolveGasFee which has a
     // tx.gasPrice fallback).  Fall back to deriving from the receipt only when not provided.
@@ -747,6 +811,9 @@ const resolveBuyAmount = async (params: {
       throw new Error(`Cannot resolve ETH buy amount: missing startBalance or endBalance. startBalance=${startBalance?.toString() ?? 'null'}, endBalance=${endBalance?.toString() ?? 'null'}, balanceBeforeProvided=${balanceBefore ?? 'null'}, txHash=${txHash}, recipient=${recipient}`);
     }
     
+    // The buy amount is the GROSS ETH received from the swap (before gas was deducted).
+    // Formula: endBalance - startBalance + gasCost
+    // This represents the actual ETH output from the swap router.
     const delta = endBalance - startBalance + gasCost;
     if (delta <= 0n) {
       throw new Error(`ETH buy amount delta is non-positive: startBalance=${startBalance.toString()}, endBalance=${endBalance.toString()}, gasCost=${gasCost.toString()}, delta=${delta.toString()}. Possible causes: 1) No ETH was received in swap, 2) Gas cost exceeds received amount, 3) Balance lookup incorrect.`);
@@ -799,6 +866,12 @@ const isSolanaMint = (value: string) => {
   }
 };
 
+/**
+ * Records a Jupiter-discovered Solana token in the `tokens` collection. Delegates
+ * to the registry so the write is insert-only (existing rows are never
+ * overwritten) and missing fields (e.g. unknown decimals) are omitted rather
+ * than stored as placeholders.
+ */
 const saveJupiterToken = async (token: {
   id: string;
   symbol?: string;
@@ -811,61 +884,18 @@ const saveJupiterToken = async (token: {
   updatedAt?: string;
 }) => {
   if (!token?.id) return;
-  try {
-    await withWaitLogger(
-      {
-        file: 'altair_backend1/src/app/api/test-swap/route.ts',
-        target: 'connectToDatabase',
-        description: 'MongoDB connection for Jupiter token save',
-      },
-      () => connectToDatabase()
-    );
-    await withWaitLogger(
-      {
-        file: 'altair_backend1/src/app/api/test-swap/route.ts',
-        target: 'Token.updateOne',
-        description: 'save Jupiter token metadata',
-      },
-      () =>
-        Token.updateOne(
-          { mint: token.id },
-          {
-            $set: {
-              mint: token.id,
-              chain: 'Solana',
-              chainId: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
-              symbol: token.symbol ?? null,
-              name: token.name ?? null,
-              decimals: token.decimals ?? null,
-              icon: token.icon ?? null,
-              tags: token.tags ?? [],
-              isVerified: token.isVerified ?? null,
-              tokenProgram: token.tokenProgram ?? null,
-              jupUpdatedAt: token.updatedAt ?? null,
-              source: 'jupiter',
-              lastFetchedAt: new Date(),
-            },
-          },
-          { upsert: true }
-        )
-    );
-    console.log('[test-swap] saved token from Jupiter', {
-      mint: token.id,
-      chain: 'Solana',
-      chainId: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
-      symbol: token.symbol,
-      name: token.name,
-      decimals: token.decimals,
-      isVerified: token.isVerified,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn('[test-swap] failed to save token from Jupiter', {
-      mint: token.id,
-      symbol: token.symbol,
-      error: message,
-    });
-  }
+  await recordTokenIfMissing({
+    mint: token.id,
+    chain: 'SOLANA_MAINNET',
+    symbol: token.symbol ?? null,
+    name: token.name ?? null,
+    decimals: typeof token.decimals === 'number' ? token.decimals : null,
+    icon: token.icon ?? null,
+    tags: token.tags ?? undefined,
+    isVerified: typeof token.isVerified === 'boolean' ? token.isVerified : null,
+    tokenProgram: token.tokenProgram ?? null,
+    source: 'jupiter',
+  });
 };
 
 async function findJupiterToken(input: string): Promise<JupiterTokenInfo | null> {
@@ -876,6 +906,31 @@ async function findJupiterToken(input: string): Promise<JupiterTokenInfo | null>
     hasApiKey: Boolean(process.env.JUPITER_API_KEY),
   });
   if (!normalized) return null;
+
+  // Skip the Jupiter round-trip when the mint is already recorded and we have
+  // usable decimals stored. Symbol inputs can't be short-circuited because we
+  // don't know the mint until Jupiter resolves it.
+  if (isSolanaMint(normalized)) {
+    try {
+      const existing = await Token.findOne(
+        { mint: normalized },
+        { decimals: 1, symbol: 1 }
+      ).lean<{ decimals?: number | null; symbol?: string | null } | null>();
+      if (existing && typeof existing.decimals === 'number') {
+        console.log('[test-swap] findJupiterToken: served from tokens collection', {
+          mint: normalized,
+        });
+        return {
+          address: normalized,
+          decimals: existing.decimals,
+          symbol: existing.symbol ?? undefined,
+        };
+      }
+    } catch (err) {
+      console.warn('[test-swap] findJupiterToken: pre-check read failed; falling through', err);
+    }
+  }
+
   const tokens = await withWaitLogger(
     {
       file: 'altair_backend1/src/app/api/test-swap/route.ts',
@@ -946,9 +1001,394 @@ const applyTokenEnvOverrides = (chainKey: ChainKey, tokens: Record<string, Token
   return out;
 };
 
+// ============================================================================
+// Provider-Specific Swap Functions
+// ============================================================================
+
+type ZeroXV1SwapParams = {
+  resolvedChainKey: ChainKey;
+  chainConfig: ChainInfo;
+  tokenConfig: Record<string, TokenInfo>;
+  normalizedSellToken: string;
+  normalizedBuyToken: string;
+  zeroXSellToken: string;
+  zeroXBuyToken: string;
+  sellAmountRaw: string;
+  recipient: string;
+  evmFeeRecipient: string | null;
+  evmAltairFeePct: number | null;
+  zeroXApiKey: string | null;
+  resolvedEvmSellToken: ResolvedEvmToken | null;
+  resolvedEvmBuyToken: ResolvedEvmToken | null;
+};
+
+type ZeroXV2SwapParams = {
+  resolvedChainKey: ChainKey;
+  chainConfig: ChainInfo;
+  tokenConfig: Record<string, TokenInfo>;
+  normalizedSellToken: string;
+  normalizedBuyToken: string;
+  zeroXV2SellToken: string;
+  zeroXV2BuyToken: string;
+  sellAmountRaw: string;
+  recipient: string;
+  evmFeeRecipient: string | null;
+  evmAltairFeePct: number | null;
+  zeroXApiKey: string | null;
+  resolvedEvmSellToken: ResolvedEvmToken | null;
+  resolvedEvmBuyToken: ResolvedEvmToken | null;
+};
+
+type ZeroXSwapResult = {
+  methodParameters: { to: string; calldata: string; value: string };
+  source: string;
+  chainRpcCandidates: string[];
+  sellTokenAddress?: string;
+  buyTokenAddress?: string;
+  providerFee?: { token: string; amount: string; decimals: number | null } | null;
+  integratorFee?: { token: string; amount: string; type: string } | null;
+  buyAmount?: string | null;
+};
+
+/**
+ * Execute 0x v1 swap quote (testnets)
+ */
+async function execute0xV1Swap(params: ZeroXV1SwapParams): Promise<ZeroXSwapResult> {
+  const {
+    resolvedChainKey,
+    chainConfig,
+    tokenConfig,
+    normalizedSellToken,
+    normalizedBuyToken,
+    zeroXSellToken,
+    zeroXBuyToken,
+    sellAmountRaw,
+    recipient,
+    evmFeeRecipient,
+    evmAltairFeePct,
+    zeroXApiKey,
+    resolvedEvmSellToken,
+    resolvedEvmBuyToken,
+  } = params;
+
+  const v1Endpoints: Partial<Record<ChainKey, string>> = {
+    ETH_SEPOLIA: 'https://sepolia.api.0x.org/swap/v1/quote',
+    BASE_SEPOLIA: 'https://base-sepolia.api.0x.org/swap/v1/quote',
+    ETH_MAINNET: 'https://api.0x.org/swap/v1/quote',
+    BASE_MAINNET: 'https://base.api.0x.org/swap/v1/quote',
+  };
+
+  const v1Endpoint = v1Endpoints[resolvedChainKey];
+  if (!v1Endpoint) {
+    throw new Error(`0x v1 not available for chain ${resolvedChainKey}`);
+  }
+
+  const v1Url = new URL(v1Endpoint);
+  v1Url.searchParams.set('sellToken', zeroXSellToken);
+  v1Url.searchParams.set('buyToken', zeroXBuyToken);
+  v1Url.searchParams.set('sellAmount', sellAmountRaw);
+  v1Url.searchParams.set('takerAddress', recipient);
+  v1Url.searchParams.set('slippagePercentage', '0.005');
+  if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
+    v1Url.searchParams.set('buyTokenPercentageFee', String(evmAltairFeePct));
+    v1Url.searchParams.set('feeRecipient', evmFeeRecipient);
+  }
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (zeroXApiKey) headers['0x-api-key'] = zeroXApiKey;
+
+  const v1CacheKey = buildQuoteCacheKey([
+    '0x',
+    'v1',
+    resolvedChainKey,
+    zeroXSellToken,
+    zeroXBuyToken,
+    sellAmountRaw,
+    recipient,
+  ]);
+  const cachedV1Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v1CacheKey);
+  let methodParameters: { to: string; calldata: string; value: string };
+
+  if (cachedV1Method) {
+    methodParameters = cachedV1Method;
+  } else {
+    console.log('[test-swap] 0x v1 request context', {
+      resolvedChainKey,
+      chainConfig,
+      tokenConfig,
+      normalizedSellToken,
+      normalizedBuyToken,
+      zeroXSellToken,
+      zeroXBuyToken,
+      sellAmountRaw,
+      recipient,
+      zeroXUrl: v1Url.toString(),
+    });
+
+    const v1Res = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v1 quote',
+        description: 'swap quote response',
+      },
+      () => fetch(v1Url.toString(), { headers, method: 'GET' })
+    );
+    if (!v1Res.ok) {
+      const errText = await v1Res.text();
+      let msg = errText;
+      try {
+        const errJson = JSON.parse(errText) as { message?: string };
+        if (errJson?.message?.toLowerCase().includes('no route')) {
+          msg = `No swap route on ${resolvedChainKey} (0x may have limited testnet liquidity). Try a different amount or chain.`;
+        }
+      } catch {
+        // keep msg
+      }
+      throw new Error(`0x ${resolvedChainKey} quote failed: ${msg}`);
+    }
+
+    const v1Payload = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v1 response.json',
+        description: 'parse 0x v1 response',
+      },
+      async () => (await v1Res.json()) as { to?: string; data?: string; value?: string; buyAmount?: string }
+    );
+    if (!v1Payload?.to || !v1Payload?.data || v1Payload?.value === undefined) {
+      throw new Error(`0x ${resolvedChainKey} response missing to/data/value`);
+    }
+    methodParameters = { to: v1Payload.to, calldata: v1Payload.data, value: v1Payload.value };
+    setQuoteCache(v1CacheKey, methodParameters);
+  }
+
+  return {
+    methodParameters,
+    source: '0x v1',
+    chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
+    sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
+    buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
+    providerFee: null,
+    integratorFee: null,
+    buyAmount: v1Payload?.buyAmount ?? null,
+  };
+}
+
+/**
+ * Execute 0x v2 swap quote (mainnets with allowance-holder)
+ */
+async function execute0xV2Swap(params: ZeroXV2SwapParams): Promise<ZeroXSwapResult> {
+  const {
+    resolvedChainKey,
+    chainConfig,
+    tokenConfig,
+    normalizedSellToken,
+    normalizedBuyToken,
+    zeroXV2SellToken,
+    zeroXV2BuyToken,
+    sellAmountRaw,
+    recipient,
+    evmFeeRecipient,
+    evmAltairFeePct,
+    zeroXApiKey,
+    resolvedEvmSellToken,
+    resolvedEvmBuyToken,
+  } = params;
+
+  if (!zeroXApiKey) {
+    throw new Error('ZEROX_API_KEY is required for 0x Swap API v2 (mainnet). Set it in .env and restart the server.');
+  }
+
+  const evmAltairFeeBps = evmAltairFeePct !== null && evmAltairFeePct > 0 ? pctToBps(evmAltairFeePct) : null;
+
+  const v2CacheKey = buildQuoteCacheKey([
+    '0x',
+    'v2',
+    resolvedChainKey,
+    zeroXV2SellToken,
+    zeroXV2BuyToken,
+    sellAmountRaw,
+    recipient,
+  ]);
+  const cachedV2Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v2CacheKey);
+  let methodParameters: { to: string; calldata: string; value: string };
+  let resolvedProviderFee: { token: string; amount: string; decimals: number | null } | null = null;
+  let resolvedIntegratorFee: { token: string; amount: string; type: string } | null = null;
+  let v2Payload: {
+    liquidityAvailable?: boolean;
+    buyAmount?: string;
+    transaction?: { to: string; data: string; value: string; gas?: string };
+    fees?: {
+      integratorFee?: {
+        amount: string;
+        token: string;
+        type: string;
+      };
+      zeroExFee?: {
+        amount: string;
+        token: string;
+        type: string;
+      };
+    };
+  } | null = null;
+
+  if (cachedV2Method) {
+    methodParameters = cachedV2Method;
+  } else {
+    // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
+    // swapFeeBps is in basis points (0.5% = 50 bps).
+    // swapFeeToken must be either the buyToken or sellToken address.
+    // Fees are deducted from the output (buy token), so we try swapFeeToken=buyToken first.
+    // Some token pairs fail validation with buyToken as the fee token, so we fall back to
+    // sellToken on SWAP_VALIDATION_FAILED.
+    const tryV2Quote = async (feeToken: string): Promise<Response> => {
+      const url = new URL('https://api.0x.org/swap/allowance-holder/quote');
+      url.searchParams.set('chainId', String(chainConfig.chainId));
+      url.searchParams.set('sellToken', zeroXV2SellToken);
+      url.searchParams.set('buyToken', zeroXV2BuyToken);
+      url.searchParams.set('sellAmount', sellAmountRaw);
+      url.searchParams.set('taker', recipient);
+      url.searchParams.set('slippageBps', '50');
+      if (evmFeeRecipient !== null && evmAltairFeeBps !== null) {
+        url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
+        url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
+        url.searchParams.set('swapFeeToken', feeToken);
+      }
+      return fetch(url.toString(), {
+        headers: {
+          Accept: 'application/json',
+          '0x-api-key': zeroXApiKey,
+          '0x-version': 'v2',
+        },
+        method: 'GET',
+      });
+    };
+
+    // Try with buyToken as fee token first (fees are deducted from output)
+    let v2Res = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v2 quote (feeToken=buyToken)',
+        description: 'swap quote response',
+      },
+      () => tryV2Quote(zeroXV2BuyToken)
+    );
+
+    // If validation failed, retry with sellToken as fee token
+    if (!v2Res.ok && evmAltairFeeBps !== null) {
+      const errText = await v2Res.text().catch(() => '');
+      if (errText.includes('SWAP_VALIDATION_FAILED')) {
+        console.log('[test-swap] 0x v2 SWAP_VALIDATION_FAILED with feeToken=buyToken, retrying with feeToken=sellToken');
+        v2Res = await withWaitLogger(
+          {
+            file: 'altair_backend1/src/app/api/test-swap/route.ts',
+            target: '0x v2 quote (feeToken=sellToken)',
+            description: 'swap quote response (fallback)',
+          },
+          () => tryV2Quote(zeroXV2SellToken)
+        );
+      }
+    }
+
+    console.log('[test-swap] 0x v2 request context', {
+      resolvedChainKey,
+      chainConfig,
+      tokenConfig,
+      normalizedSellToken,
+      normalizedBuyToken,
+      zeroXSellToken: zeroXV2SellToken,
+      zeroXBuyToken: zeroXV2BuyToken,
+      sellAmountRaw,
+      recipient,
+      zeroXUrl: v2Res.url,
+    });
+
+    if (!v2Res.ok) {
+      const errText = await v2Res.text();
+      let userMessage = `0x quote failed: ${errText}`;
+      try {
+        const errJson = JSON.parse(errText) as { message?: string };
+        if (errJson?.message?.toLowerCase().includes('no route')) {
+          userMessage = `No swap route for ${normalizedSellToken}/${normalizedBuyToken} on ${resolvedChainKey}. Check chain and token addresses or increase amount.`;
+        }
+      } catch {
+        // keep userMessage
+      }
+      throw new Error(userMessage);
+    }
+
+    v2Payload = await withWaitLogger(
+      {
+        file: 'altair_backend1/src/app/api/test-swap/route.ts',
+        target: '0x v2 response.json',
+        description: 'parse 0x v2 response',
+      },
+      async () =>
+        (await v2Res.json()) as {
+          liquidityAvailable?: boolean;
+          buyAmount?: string;
+          transaction?: { to: string; data: string; value: string; gas?: string };
+          fees?: {
+            integratorFee?: {
+              amount: string;
+              token: string;
+              type: string;
+            };
+            zeroExFee?: {
+              amount: string;
+              token: string;
+              type: string;
+            };
+          };
+        }
+    );
+    if (v2Payload.liquidityAvailable === false || !v2Payload.transaction) {
+      throw new Error(`No liquidity for ${normalizedSellToken}/${normalizedBuyToken} on chain ${chainConfig.chainId}.`);
+    }
+    const tx = v2Payload.transaction;
+    if (!tx.to || !tx.data || tx.value === undefined) {
+      throw new Error('0x quote response missing transaction fields');
+    }
+    methodParameters = { to: tx.to, calldata: tx.data, value: tx.value };
+    setQuoteCache(v2CacheKey, methodParameters);
+    // Extract the 0x protocol fee (zeroExFee) from the v2 response for provider fee tracking
+    if (v2Payload.fees?.zeroExFee?.amount && v2Payload.fees?.zeroExFee?.token) {
+      resolvedProviderFee = {
+        token: v2Payload.fees.zeroExFee.token,
+        amount: v2Payload.fees.zeroExFee.amount,
+        decimals: null, // 0x returns fee amount in the token's raw units; decimals are not provided in the fee object
+      };
+      console.log('[test-swap] Extracted 0x protocol fee from v2 response:', resolvedProviderFee);
+    }
+    // Extract the integrator fee (Altair fee) from the v2 response
+    if (v2Payload.fees?.integratorFee?.amount && v2Payload.fees?.integratorFee?.token) {
+      resolvedIntegratorFee = {
+        token: v2Payload.fees.integratorFee.token,
+        amount: v2Payload.fees.integratorFee.amount,
+        type: v2Payload.fees.integratorFee.type,
+      };
+      console.log('[test-swap] Extracted integrator fee from v2 response:', resolvedIntegratorFee);
+    }
+  }
+
+  return {
+    methodParameters,
+    source: '0x v2',
+    chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
+    sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
+    buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
+    providerFee: resolvedProviderFee,
+    integratorFee: resolvedIntegratorFee,
+    buyAmount: cachedV2Method ? null : (v2Payload?.buyAmount ?? null),
+  };
+}
+
+// ============================================================================
+// Main POST Handler
+// ============================================================================
+
 export async function POST(req: Request) {
   try {
-    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody, balanceSnapshots } = (await req
+    const { chain: requestedChain, buyToken, sellToken, amount, recipient, txHash, CID, provider: providerFromBody, balanceSnapshots, integratorFee } = (await req
       .json()
       .catch(() => ({
         chain: null,
@@ -960,6 +1400,7 @@ export async function POST(req: Request) {
         CID: null,
         provider: null,
         balanceSnapshots: null,
+        integratorFee: null,
       }))) as {
       chain?: ChainKey | null;
       buyToken?: string | null;
@@ -976,6 +1417,7 @@ export async function POST(req: Request) {
         gasTokenSymbol?: string | null;
         gasTokenDecimals?: number | null;
       } | null;
+      integratorFee?: { token: string; amount: string; type: string } | null;
     };
 
     const resolvedChainKey: ChainKey =
@@ -1326,7 +1768,7 @@ export async function POST(req: Request) {
             // This is exact — no arithmetic from user-typed sellAmountRaw needed.
             if (normalizedSellToken === 'ETH') {
               try {
-                const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber, 'ethSellEndBalance');
+                const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber, 'ethSellEndBalance', false);
                 if (bal !== null) {
                   ethSellEndBalance = bal.toString();
                   console.log('[test-swap] ETH sell endBalance at blockNumber:', ethSellEndBalance);
@@ -1340,7 +1782,7 @@ export async function POST(req: Request) {
             if (sellBalanceBefore === null) {
               try {
                 if (normalizedSellToken === 'ETH') {
-                  const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber - 1, 'sellBalanceBefore');
+                  const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber - 1, 'sellBalanceBefore', true);
                   if (bal !== null) {
                     sellBalanceBefore = bal.toString();
                     console.log('[test-swap] Blockchain fallback sellBalanceBefore (ETH):', sellBalanceBefore);
@@ -1364,7 +1806,7 @@ export async function POST(req: Request) {
             if (buyBalanceBefore === null) {
               try {
                 if (normalizedBuyToken === 'ETH') {
-                  const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber - 1, 'buyBalanceBefore');
+                  const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber - 1, 'buyBalanceBefore', true);
                   if (bal !== null) {
                     buyBalanceBefore = bal.toString();
                     console.log('[test-swap] Blockchain fallback buyBalanceBefore (ETH):', buyBalanceBefore);
@@ -1387,7 +1829,7 @@ export async function POST(req: Request) {
             // Gas token fallback (only when gas token ≠ sell and ≠ buy)
             if (gasTokenBefore === null && gasTokenSymbol !== normalizedSellToken && gasTokenSymbol !== normalizedBuyToken) {
               try {
-                const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber - 1, 'gasTokenBefore');
+                const bal = await getEthBalanceWithRetry(evmProvider, recipient, receiptBlockNumber - 1, 'gasTokenBefore', true);
                 if (bal !== null) {
                   gasTokenBefore = bal.toString();
                   console.log('[test-swap] Blockchain fallback gasTokenBefore (ETH):', gasTokenBefore);
@@ -1531,8 +1973,8 @@ export async function POST(req: Request) {
 
         // When buyToken === ETH, recompute buyAmountRaw using the finalized buyBalanceBefore
         // (which may have been updated by the blockchain fallback above) and ethEndBalance.
-        // Formula: buyAmountRaw = ethEndBalance - buyBalanceBefore + gasCost
-        // This is the pure ETH received from the swap router (gas-neutral).
+        // Formula: buyAmountRaw = ethEndBalance - buyBalanceBefore
+        // This is the NET ETH received (after gas was deducted).
         // The original buyAmountRaw from resolveBuyAmount used the client-snapshot startBalance
         // which may be stale; the blockchain-fallback buyBalanceBefore is always accurate.
         const ethBuyEndBalanceForAmount = buyAmountResult.ethEndBalance ?? null;
@@ -1540,13 +1982,12 @@ export async function POST(req: Request) {
           try {
             const endBal = BigInt(ethBuyEndBalanceForAmount);
             const startBal = BigInt(buyBalanceBefore);
-            const recomputedDelta = endBal - startBal + gasFeeRaw;
+            const recomputedDelta = endBal - startBal;
             if (recomputedDelta > 0n) {
               buyAmountRaw = recomputedDelta.toString();
               console.log('[test-swap] buyAmountRaw recomputed for ETH:', {
                 ethEndBalance: ethBuyEndBalanceForAmount,
                 buyBalanceBefore,
-                gasFeeRaw: gasFeeRaw.toString(),
                 recomputedDelta: buyAmountRaw,
               });
             }
@@ -1702,10 +2143,13 @@ export async function POST(req: Request) {
           }
         }
 
-        // --- Extract Altair fee from EVM transaction receipt ---
-        // 0x deducts the fee from the swap output and transfers it to the feeRecipient
-        // address via an ERC-20 Transfer event. We parse the tx receipt logs to find
-        // Transfer events where the `to` address matches the feeRecipient.
+        // --- Extract Altair fee from EVM transaction ---
+        // Priority 1: Use integratorFee from the 0x quote response (passed through frontend).
+        //   This works for ALL buy tokens, including ETH (native token), because 0x reports
+        //   the fee amount directly. ETH transfers don't emit ERC-20 Transfer events, so
+        //   receipt log parsing (Priority 2) cannot detect fees paid in ETH.
+        // Priority 2: Parse ERC-20 Transfer events from the tx receipt logs (only works for
+        //   ERC-20 buy tokens).
         // The fee config is resolved here (not from the outer scope) because the writeback
         // section runs before the EVM fee resolution block in the quote path.
         if (!isSolana) {
@@ -1713,62 +2157,99 @@ export async function POST(req: Request) {
             const writebackFeePct = resolveFeePct({ action: 'singleChainSwap', platform: '0x', chainType: 'EVM' });
             const writebackFeeRecipient = resolveFeeRecipient(resolvedChainKey);
             if (writebackFeePct !== null && writebackFeePct > 0 && writebackFeeRecipient !== null) {
-              const evmReceipt = buyAmountResult.evmReceipt ?? null;
-              if (evmReceipt && Array.isArray(evmReceipt.logs) && evmReceipt.logs.length > 0) {
-                const feeRecipientLower = writebackFeeRecipient.toLowerCase();
-                const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-                // Build a map of known token addresses -> { symbol, decimals }
-                const knownTokens: Record<string, { symbol: string; decimals: number }> = {};
-                const sellAddr = normalizedSellToken === 'ETH'
-                  ? null
-                  : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? null);
-                const buyAddr = normalizedBuyToken === 'ETH'
-                  ? null
-                  : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? null);
-                if (sellAddr) {
-                  knownTokens[sellAddr.toLowerCase()] = {
-                    symbol: normalizedSellToken,
-                    decimals: typeof sellDecimals === 'number' ? sellDecimals : 18,
-                  };
+              if (resolvedAltairFee === null) {
+                // Priority 1: Use integratorFee from the 0x quote response (passed via frontend)
+                if (integratorFee && typeof integratorFee === 'object' && integratorFee.amount) {
+                  const feeAmount = BigInt(integratorFee.amount);
+                  if (feeAmount > 0n) {
+                    // Resolve the fee token symbol and decimals from the token config
+                    const feeTokenAddress = integratorFee.token?.toLowerCase() ?? '';
+                    let feeSymbol = feeTokenAddress;
+                    let feeDecimals = 18;
+                    if (feeTokenAddress === ZEROX_ETH_PLACEHOLDER.toLowerCase()) {
+                      feeSymbol = 'ETH';
+                      feeDecimals = 18;
+                    } else {
+                      // Look up the fee token address in tokenConfig (symbol -> { address, decimals })
+                      for (const [symbol, info] of Object.entries(tokenConfig)) {
+                        if (info.address?.toLowerCase() === feeTokenAddress) {
+                          feeSymbol = symbol;
+                          feeDecimals = info.decimals ?? 18;
+                          break;
+                        }
+                      }
+                    }
+                    resolvedAltairFee = {
+                      token: feeSymbol,
+                      amount: integratorFee.amount,
+                      decimals: feeDecimals,
+                      bps: pctToBps(writebackFeePct),
+                    };
+                    console.log('[test-swap] Resolved Altair fee from 0x integratorFee:', resolvedAltairFee);
+                  }
                 }
-                if (buyAddr) {
-                  knownTokens[buyAddr.toLowerCase()] = {
-                    symbol: normalizedBuyToken,
-                    decimals: typeof buyDecimals === 'number' ? buyDecimals : 18,
-                  };
+              }
+              if (resolvedAltairFee === null) {
+                // Priority 2: Parse ERC-20 Transfer events from tx receipt logs
+                // Note: This only works for ERC-20 buy tokens. ETH transfers don't emit
+                // Transfer events, so fees paid in ETH cannot be extracted from the receipt.
+                const evmReceipt = buyAmountResult.evmReceipt ?? null;
+                if (evmReceipt && Array.isArray(evmReceipt.logs) && evmReceipt.logs.length > 0) {
+                  const feeRecipientLower = writebackFeeRecipient.toLowerCase();
+                  const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+                  // Build a map of known token addresses -> { symbol, decimals }
+                  const knownTokens: Record<string, { symbol: string; decimals: number }> = {};
+                  const sellAddr = normalizedSellToken === 'ETH'
+                    ? null
+                    : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? null);
+                  const buyAddr = normalizedBuyToken === 'ETH'
+                    ? null
+                    : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? null);
+                  if (sellAddr) {
+                    knownTokens[sellAddr.toLowerCase()] = {
+                      symbol: normalizedSellToken,
+                      decimals: typeof sellDecimals === 'number' ? sellDecimals : 18,
+                    };
+                  }
+                  if (buyAddr) {
+                    knownTokens[buyAddr.toLowerCase()] = {
+                      symbol: normalizedBuyToken,
+                      decimals: typeof buyDecimals === 'number' ? buyDecimals : 18,
+                    };
+                  }
+                  // Iterate logs to find Transfer events to feeRecipient
+                  for (const log of evmReceipt.logs) {
+                    if (typeof log !== 'object' || log === null) continue;
+                    const logData = log as { topics?: string[]; data?: string; address?: string };
+                    if (!Array.isArray(logData.topics) || logData.topics.length < 3) continue;
+                    if (logData.topics[0] !== transferTopic) continue;
+                    // topic[2] is the indexed `to` address (left-padded to 32 bytes)
+                    const toAddress = '0x' + logData.topics[2].slice(26).toLowerCase();
+                    if (toAddress !== feeRecipientLower) continue;
+                    // Extract the transfer amount from log data (uint256)
+                    const amountHex = logData.data ?? '0x0';
+                    const feeAmount = BigInt(amountHex);
+                    if (feeAmount <= 0n) continue;
+                    // Resolve token symbol/decimals from the log's contract address
+                    const logContract = (logData.address ?? '').toLowerCase();
+                    const known = knownTokens[logContract];
+                    const feeSymbol = known?.symbol ?? logContract;
+                    const feeDecimals = known?.decimals ?? 18;
+                    resolvedAltairFee = {
+                      token: feeSymbol,
+                      amount: feeAmount.toString(),
+                      decimals: feeDecimals,
+                      bps: pctToBps(writebackFeePct),
+                    };
+                    console.log('[test-swap] Extracted EVM Altair fee from tx receipt:', resolvedAltairFee);
+                    break; // Use the first matching Transfer event
+                  }
+                  if (resolvedAltairFee === null) {
+                    console.warn('[test-swap] No Transfer event to feeRecipient found in tx receipt logs');
+                  }
+                } else {
+                  console.warn('[test-swap] No EVM receipt available for fee extraction');
                 }
-                // Iterate logs to find Transfer events to feeRecipient
-                for (const log of evmReceipt.logs) {
-                  if (typeof log !== 'object' || log === null) continue;
-                  const logData = log as { topics?: string[]; data?: string; address?: string };
-                  if (!Array.isArray(logData.topics) || logData.topics.length < 3) continue;
-                  if (logData.topics[0] !== transferTopic) continue;
-                  // topic[2] is the indexed `to` address (left-padded to 32 bytes)
-                  const toAddress = '0x' + logData.topics[2].slice(26).toLowerCase();
-                  if (toAddress !== feeRecipientLower) continue;
-                  // Extract the transfer amount from log data (uint256)
-                  const amountHex = logData.data ?? '0x0';
-                  const feeAmount = BigInt(amountHex);
-                  if (feeAmount <= 0n) continue;
-                  // Resolve token symbol/decimals from the log's contract address
-                  const logContract = (logData.address ?? '').toLowerCase();
-                  const known = knownTokens[logContract];
-                  const feeSymbol = known?.symbol ?? logContract;
-                  const feeDecimals = known?.decimals ?? 18;
-                  resolvedAltairFee = {
-                    token: feeSymbol,
-                    amount: feeAmount.toString(),
-                    decimals: feeDecimals,
-                    bps: pctToBps(writebackFeePct),
-                  };
-                  console.log('[test-swap] Extracted EVM Altair fee from tx receipt:', resolvedAltairFee);
-                  break; // Use the first matching Transfer event
-                }
-                if (resolvedAltairFee === null) {
-                  console.warn('[test-swap] No Transfer event to feeRecipient found in tx receipt logs');
-                }
-              } else {
-                console.warn('[test-swap] No EVM receipt available for fee extraction');
               }
             }
           } catch (feeErr) {
@@ -2009,6 +2490,51 @@ export async function POST(req: Request) {
         } catch (zgErr) {
           console.warn('[test-swap] swap 0G write failed', zgErr);
         }
+
+        // Back-fill an approximate price on the buyToken when it's brand new.
+        // Anchor: sellToken's stored price (typically <5 min old via the periodic
+        // CoinGecko refresher). setPriceIfMissing is a no-op when the buyToken
+        // already has a price, so this never overwrites canonical data. For EVM
+        // native ETH we use the synthetic native mint on both sides; the row
+        // carries its USD price via the periodic refresher + wrappedProxy.
+        try {
+          const sellMintForPrice = resolvedChainKey === 'SOLANA_MAINNET'
+            ? tokenConfig[normalizedSellToken]?.address ?? null
+            : normalizedSellToken === 'ETH'
+              ? buildEvmNativeMint(resolvedChainKey)
+              : resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address ?? null;
+          const buyMintForPrice = resolvedChainKey === 'SOLANA_MAINNET'
+            ? tokenConfig[normalizedBuyToken]?.address ?? null
+            : normalizedBuyToken === 'ETH'
+              ? buildEvmNativeMint(resolvedChainKey)
+              : resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address ?? null;
+          const sellAmountForMath = sellAmountRaw ?? amount;
+          if (
+            sellMintForPrice &&
+            buyMintForPrice &&
+            sellAmountForMath &&
+            buyAmountRaw &&
+            typeof sellDecimals === 'number' &&
+            typeof buyDecimals === 'number'
+          ) {
+            const approx = await computeApproxBuyPrice({
+              sellMint: sellMintForPrice,
+              sellAmountRaw: String(sellAmountForMath),
+              sellDecimals,
+              buyAmountRaw: String(buyAmountRaw),
+              buyDecimals,
+            });
+            if (approx) {
+              await setPriceIfMissing({
+                mint: buyMintForPrice,
+                price: approx.price,
+                priceInfoSource: approx.priceInfoSource,
+              });
+            }
+          }
+        } catch (priceErr) {
+          console.warn('[test-swap] approx price back-fill failed', priceErr);
+        }
       const shouldEmitGasUpdate =
         gasBalanceAfter !== null &&
         gasTokenSymbol !== normalizedSellToken &&
@@ -2057,6 +2583,13 @@ export async function POST(req: Request) {
             mint: tokenConfig.SOL.address,
             decimals: tokenConfig.SOL.decimals,
           });
+          await recordTokenIfMissing({
+            mint: tokenConfig.SOL.address,
+            chain: 'SOLANA_MAINNET',
+            symbol: 'SOL',
+            decimals: tokenConfig.SOL.decimals,
+            source: 'config',
+          });
           return { mint: tokenConfig.SOL.address, decimals: tokenConfig.SOL.decimals, symbol: 'SOL' };
         }
         const configuredToken = tokenConfig[symbolOrMint];
@@ -2065,6 +2598,13 @@ export async function POST(req: Request) {
             symbol: symbolOrMint,
             mint: configuredToken.address,
             decimals: configuredToken.decimals,
+          });
+          await recordTokenIfMissing({
+            mint: configuredToken.address,
+            chain: 'SOLANA_MAINNET',
+            symbol: configuredToken.symbol ?? symbolOrMint,
+            decimals: configuredToken.decimals,
+            source: 'config',
           });
           return {
             mint: configuredToken.address,
@@ -2086,6 +2626,15 @@ export async function POST(req: Request) {
             found: Boolean(jupiterToken),
             token: jupiterToken ?? null,
           });
+          // Jupiter didn't recognize this mint — record what we know (just the mint
+          // and chain) so the periodic price refresher can still attempt it.
+          if (!jupiterToken) {
+            await recordTokenIfMissing({
+              mint: symbolOrMint,
+              chain: 'SOLANA_MAINNET',
+              source: 'mint-only',
+            });
+          }
           return {
             mint: symbolOrMint,
             decimals: jupiterToken?.decimals ?? 9,
@@ -2313,229 +2862,57 @@ export async function POST(req: Request) {
       );
     }
 
-    const v1TestnetEndpoints: Partial<Record<ChainKey, string>> = {
-      ETH_SEPOLIA: 'https://sepolia.api.0x.org/swap/v1/quote',
-      BASE_SEPOLIA: 'https://base-sepolia.api.0x.org/swap/v1/quote',
+    // Execute swap with the explicitly requested provider (frontend controls retry logic)
+    const swapParams = {
+      resolvedChainKey,
+      chainConfig,
+      tokenConfig,
+      normalizedSellToken,
+      normalizedBuyToken,
+      zeroXSellToken,
+      zeroXBuyToken,
+      zeroXV2SellToken,
+      zeroXV2BuyToken,
+      sellAmountRaw,
+      recipient,
+      evmFeeRecipient,
+      evmAltairFeePct,
+      zeroXApiKey: zeroXApiKey ?? null,
+      resolvedEvmSellToken,
+      resolvedEvmBuyToken,
     };
 
-    const v1Endpoint = v1TestnetEndpoints[resolvedChainKey];
-    let methodParameters: { to: string; calldata: string; value: string };
-
-    if (v1Endpoint) {
-      const v1Url = new URL(v1Endpoint);
-      v1Url.searchParams.set('sellToken', zeroXSellToken);
-      v1Url.searchParams.set('buyToken', zeroXBuyToken);
-      v1Url.searchParams.set('sellAmount', sellAmountRaw);
-      v1Url.searchParams.set('takerAddress', recipient);
-      v1Url.searchParams.set('slippagePercentage', '0.005');
-      if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
-        v1Url.searchParams.set('buyTokenPercentageFee', String(evmAltairFeePct));
-        v1Url.searchParams.set('feeRecipient', evmFeeRecipient);
-      }
-      const headers: Record<string, string> = { Accept: 'application/json' };
-      if (zeroXApiKey) headers['0x-api-key'] = zeroXApiKey;
-
-      const v1CacheKey = buildQuoteCacheKey([
-        '0x',
-        'v1',
-        resolvedChainKey,
-        zeroXSellToken,
-        zeroXBuyToken,
-        sellAmountRaw,
-        recipient,
-      ]);
-      const cachedV1Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v1CacheKey);
-      if (cachedV1Method) {
-        methodParameters = cachedV1Method;
-      } else {
-
-      console.log('[test-swap] 0x v1 request context', {
-        resolvedChainKey,
-        chainConfig,
-        tokenConfig,
-        normalizedSellToken,
-        normalizedBuyToken,
-        zeroXSellToken,
-        zeroXBuyToken,
-        sellAmountRaw,
-        recipient,
-        zeroXUrl: v1Url.toString(),
-      });
-
-        const v1Res = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v1 quote',
-            description: 'swap quote response',
-          },
-          () => fetch(v1Url.toString(), { headers, method: 'GET' })
-        );
-        if (!v1Res.ok) {
-          const errText = await v1Res.text();
-          let msg = errText;
-          try {
-            const errJson = JSON.parse(errText) as { message?: string };
-            if (errJson?.message?.toLowerCase().includes('no route')) {
-              msg = `No swap route on ${resolvedChainKey} (0x may have limited testnet liquidity). Try a different amount or chain.`;
-            }
-          } catch {
-            // keep msg
-          }
-          return NextResponse.json({ error: `0x ${resolvedChainKey} quote failed: ${msg}` }, { status: 500 });
-        }
-
-        const v1Payload = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v1 response.json',
-            description: 'parse 0x v1 response',
-          },
-          async () => (await v1Res.json()) as { to?: string; data?: string; value?: string }
-        );
-        if (!v1Payload?.to || !v1Payload?.data || v1Payload?.value === undefined) {
-          return NextResponse.json({ error: `0x ${resolvedChainKey} response missing to/data/value` }, { status: 500 });
-        }
-        methodParameters = { to: v1Payload.to, calldata: v1Payload.data, value: v1Payload.value };
-        setQuoteCache(v1CacheKey, methodParameters);
-      }
+    // Use the provider specified in the request, default to '0x v2'
+    const requestedProvider = typeof providerFromBody === 'string' && providerFromBody.trim().length > 0
+      ? providerFromBody.trim()
+      : '0x v2';
+    
+    console.log(`[test-swap] Using provider: ${requestedProvider}`);
+    
+    let result: ZeroXSwapResult;
+    if (requestedProvider === '0x v1') {
+      result = await execute0xV1Swap(swapParams);
+    } else if (requestedProvider === '0x v2') {
+      result = await execute0xV2Swap(swapParams);
     } else {
-      if (!zeroXApiKey) {
-        return NextResponse.json(
-          { error: 'ZEROX_API_KEY is required for 0x Swap API v2 (mainnet). Set it in .env and restart the server.' },
-          { status: 500 }
-        );
-      }
+      return NextResponse.json(
+        { error: `Unknown provider: ${requestedProvider}` },
+        { status: 400 }
+      );
+    }
 
-      const v2Url = new URL('https://api.0x.org/swap/allowance-holder/quote');
-      v2Url.searchParams.set('chainId', String(chainConfig.chainId));
-      v2Url.searchParams.set('sellToken', zeroXV2SellToken);
-      v2Url.searchParams.set('buyToken', zeroXV2BuyToken);
-      v2Url.searchParams.set('sellAmount', sellAmountRaw);
-      v2Url.searchParams.set('taker', recipient);
-      v2Url.searchParams.set('slippageBps', '50');
-      if (evmFeeRecipient !== null && evmAltairFeePct !== null && evmAltairFeePct > 0) {
-        // 0x Swap API v2 uses swapFeeRecipient + swapFeeBps + swapFeeToken for affiliate fees.
-        // swapFeeBps is in basis points (0.5% = 50 bps).
-        // swapFeeToken must be either the buyToken or sellToken address.
-        // We use the buy token since 0x deducts fees from the output.
-        const evmAltairFeeBps = pctToBps(evmAltairFeePct);
-        v2Url.searchParams.set('swapFeeRecipient', evmFeeRecipient);
-        v2Url.searchParams.set('swapFeeBps', String(evmAltairFeeBps));
-        v2Url.searchParams.set('swapFeeToken', zeroXV2BuyToken);
-      }
-
-      const v2CacheKey = buildQuoteCacheKey([
-        '0x',
-        'v2',
-        resolvedChainKey,
-        zeroXV2SellToken,
-        zeroXV2BuyToken,
-        sellAmountRaw,
-        recipient,
-      ]);
-      const cachedV2Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v2CacheKey);
-      if (cachedV2Method) {
-        methodParameters = cachedV2Method;
-      } else {
-
-      console.log('[test-swap] 0x v2 request context', {
-        resolvedChainKey,
-        chainConfig,
-        tokenConfig,
-        normalizedSellToken,
-        normalizedBuyToken,
-        zeroXSellToken: zeroXV2SellToken,
-        zeroXBuyToken: zeroXV2BuyToken,
-        sellAmountRaw,
-        recipient,
-        zeroXUrl: v2Url.toString(),
-      });
-
-        const v2Res = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v2 quote',
-            description: 'swap quote response',
-          },
-          () =>
-            fetch(v2Url.toString(), {
-              headers: {
-                Accept: 'application/json',
-                '0x-api-key': zeroXApiKey,
-                '0x-version': 'v2',
-              },
-              method: 'GET',
-            })
-        );
-
-        if (!v2Res.ok) {
-          const errText = await v2Res.text();
-          let userMessage = `0x quote failed: ${errText}`;
-          try {
-            const errJson = JSON.parse(errText) as { message?: string };
-            if (errJson?.message?.toLowerCase().includes('no route')) {
-              userMessage = `No swap route for ${normalizedSellToken}/${normalizedBuyToken} on ${resolvedChainKey}. Check chain and token addresses or increase amount.`;
-            }
-          } catch {
-            // keep userMessage
-          }
-          return NextResponse.json({ error: userMessage }, { status: 500 });
-        }
-
-        const v2Payload = await withWaitLogger(
-          {
-            file: 'altair_backend1/src/app/api/test-swap/route.ts',
-            target: '0x v2 response.json',
-            description: 'parse 0x v2 response',
-          },
-          async () =>
-            (await v2Res.json()) as {
-              liquidityAvailable?: boolean;
-              transaction?: { to: string; data: string; value: string; gas?: string };
-              fees?: {
-                integratorFee?: {
-                  amount: string;
-                  token: string;
-                  type: string;
-                };
-                zeroExFee?: {
-                  amount: string;
-                  token: string;
-                  type: string;
-                };
-              };
-            }
-        );
-        if (v2Payload.liquidityAvailable === false || !v2Payload.transaction) {
-          return NextResponse.json(
-            { error: `No liquidity for ${normalizedSellToken}/${normalizedBuyToken} on chain ${chainConfig.chainId}.` },
-            { status: 500 }
-          );
-        }
-        const tx = v2Payload.transaction;
-        if (!tx.to || !tx.data || tx.value === undefined) {
-          return NextResponse.json({ error: '0x quote response missing transaction fields' }, { status: 500 });
-        }
-        methodParameters = { to: tx.to, calldata: tx.data, value: tx.value };
-        setQuoteCache(v2CacheKey, methodParameters);
-        // Extract the 0x protocol fee (zeroExFee) from the v2 response for provider fee tracking
-        if (v2Payload.fees?.zeroExFee?.amount && v2Payload.fees?.zeroExFee?.token) {
-          resolvedProviderFee = {
-            token: v2Payload.fees.zeroExFee.token,
-            amount: v2Payload.fees.zeroExFee.amount,
-            decimals: null, // 0x returns fee amount in the token's raw units; decimals are not provided in the fee object
-          };
-          console.log('[test-swap] Extracted 0x protocol fee from v2 response:', resolvedProviderFee);
-        }
-      }
+    // Update resolvedProviderFee if the provider returned one
+    if (result.providerFee) {
+      resolvedProviderFee = result.providerFee;
     }
 
     const responseBody = {
-      methodParameters,
-      source: '0x',
-      chainRpcCandidates: resolveRpcUrls(chainConfig.rpcUrls),
-      sellTokenAddress: normalizedSellToken === 'ETH' ? undefined : (resolvedEvmSellToken?.address ?? tokenConfig[normalizedSellToken]?.address),
-      buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
+      methodParameters: result.methodParameters,
+      source: result.source,
+      chainRpcCandidates: result.chainRpcCandidates,
+      sellTokenAddress: result.sellTokenAddress,
+      buyTokenAddress: result.buyTokenAddress,
+      integratorFee: result.integratorFee ?? null,
     };
     return NextResponse.json(responseBody);
   } catch (error) {

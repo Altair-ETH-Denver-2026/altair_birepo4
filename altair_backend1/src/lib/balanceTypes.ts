@@ -11,6 +11,10 @@ export type ApiTokenBalance = {
   balanceRaw?: string;
   source?: ApiBalanceSource;
   verifiedAt?: number;
+  // USD price for this token, looked up from the `tokens` collection at API
+  // response time. `null` means we have a row for the token but no price yet;
+  // `undefined` means the backend hasn't run the lookup for this entry.
+  price?: number | null;
 };
 
 export type ApiChainBalances = {
