@@ -80,23 +80,19 @@ For the side panel, this state lives in `usePanels()` (`transactionInfoPanels` a
 
 #### Lifecycle (event-driven)
 
-The panel reacts to three browser-level swap events. `altair:swap-confirmed` is dispatched from `Chat.tsx` the instant the user clicks **Confirm Swap**; `altair:swap-submitted` and `altair:swap-complete` are emitted from the swap libraries ([`useSwap.ts`](../../../altair_frontend1/src/lib/useSwap.ts), [`useSolanaSwap.ts`](../../../altair_frontend1/src/lib/useSolanaSwap.ts), [`useRelay.ts`](../../../altair_frontend1/src/lib/useRelay.ts)). All three are typed dispatchers in [`altair_frontend1/src/lib/eventTypes.ts`](../../../altair_frontend1/src/lib/eventTypes.ts):
+The panel reacts to two browser-level swap events emitted from the swap libraries ([`useSwap.ts`](../../../altair_frontend1/src/lib/useSwap.ts), [`useSolanaSwap.ts`](../../../altair_frontend1/src/lib/useSolanaSwap.ts), [`useRelay.ts`](../../../altair_frontend1/src/lib/useRelay.ts)) via the typed dispatchers in [`altair_frontend1/src/lib/eventTypes.ts`](../../../altair_frontend1/src/lib/eventTypes.ts):
 
-1. **`altair:swap-confirmed`** — fires synchronously when the user clicks **Confirm Swap** in the CONFIRM_SWAP chat button row, before the wallet is even asked to sign. Carries `sellToken`, `buyToken`, `sellChain`, `buyChain`, `amount`, `intentType`. Dispatch site: the CONFIRM_SWAP branch of `handleChatButtonRowAction` in `Chat.tsx` (uses `deriveConfirmedSwapMeta(intent)` to derive normalized tokens/chains from the intent — same Solana ETH→SOL normalization that `executeIntentNow` uses). Each display location listens and creates a **pending panel with `txKey: null`, `txHash: null`** so the panel appears in the UI immediately, with no delay between the SWAP_SUBMITTED chat text and the panel:
-   - Side panel: `handleSwapConfirmedForPanel` in [`UserMenu.tsx`](../../../altair_frontend1/src/components/UserMenu.tsx) — calls `addTransactionInfoPanelRef.current({...})` with `txKey: null`, snapshotting the buy-token balance from `balancesByChain`.
-   - In-chat: `handleSwapConfirmedInChat` in [`Chat.tsx`](../../../altair_frontend1/src/components/Chat.tsx) — appends a new panel-only assistant message with `txKey: null` and writes the buy-token snapshot to `pendingSwapSnapshotsRef` via `writeSnapshotIfMissing`.
+1. **`altair:swap-submitted`** — fires after the chain transaction is broadcast. Carries `sellToken`, `buyToken`, `sellChain`, `buyChain`, `amount`, `txHash`/`requestId`. Each display location listens and creates a new pending panel:
+   - Side panel: `handleSwapSubmittedForPanel` at [`UserMenu.tsx:1449`](../../../altair_frontend1/src/components/UserMenu.tsx) — calls `addTransactionInfoPanel(...)` and snapshots the buy-token balance from `balancesByChain`.
+   - In-chat: `handleSwapSubmittedInChat` at [`Chat.tsx:530`](../../../altair_frontend1/src/components/Chat.tsx) — appends a new panel-only assistant message and snapshots the buy-token balance from `localStorage` via `readCachedTokenSnapshot`.
 
-2. **`altair:swap-submitted`** — fires after the chain transaction is broadcast and a `txHash`/`requestId` is available. Carries `sellToken`, `buyToken`, `sellChain`, `buyChain`, `amount`, `txHash`/`requestId`. Each listener looks for an existing pending panel matching `(sellToken, buyToken, sellChain)` with `txKey === null` (iterating from newest to oldest) and **patches in the `txKey` and `txHash`**, rather than creating a new panel. If no matching pending panel is found (e.g., the AI auto-executed without a Confirm click), the listener falls back to creating a new pending panel — preserving the legacy behavior:
-   - Side panel: `handleSwapSubmittedForPanel` in [`UserMenu.tsx`](../../../altair_frontend1/src/components/UserMenu.tsx) — uses `setTransactionInfoPanelsRef.current((current) => ...)` to do the find-and-update.
-   - In-chat: `handleSwapSubmittedInChat` in [`Chat.tsx`](../../../altair_frontend1/src/components/Chat.tsx) — uses `setMessages((prev) => ...)` to do the find-and-update.
-
-3. **`altair:swap-complete`** — fires after the backend writeback completes. Carries `chain` (sell chain), `sellToken`, `buyToken`, and a `balanceUpdates` array of `{ chain, symbol, balanceAfterRaw, decimals }`. Both listeners:
+2. **`altair:swap-complete`** — fires after the backend writeback completes. Carries `chain` (sell chain), `sellToken`, `buyToken`, and a `balanceUpdates` array of `{ chain, symbol, balanceAfterRaw, decimals }`. Both listeners:
    - Match the existing pending panel by `txKey` if available, otherwise by sell/buy tokens + sell chain.
    - Find the `balanceUpdate` entry for the buy token on the buy chain.
    - Compute `received = balanceAfterRaw - buyBalanceBeforeRaw` (raw units → human readable via `rawDeltaToHuman`).
    - Flip the panel to `status: 'complete'` with `buyAmount` set to the delta.
-   - Side panel handler: `handleSwapCompleteForPanel` in [`UserMenu.tsx`](../../../altair_frontend1/src/components/UserMenu.tsx).
-   - In-chat handler: `handleSwapCompleteInChat` in [`Chat.tsx`](../../../altair_frontend1/src/components/Chat.tsx).
+   - Side panel handler: `handleSwapCompleteForPanel` at [`UserMenu.tsx:1485`](../../../altair_frontend1/src/components/UserMenu.tsx).
+   - In-chat handler: `handleSwapCompleteInChat` at [`Chat.tsx:588`](../../../altair_frontend1/src/components/Chat.tsx).
 
 #### Surfacing the computed buyAmount to the agent's reply
 
