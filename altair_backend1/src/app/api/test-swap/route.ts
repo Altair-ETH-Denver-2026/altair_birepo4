@@ -1105,11 +1105,13 @@ async function execute0xV1Swap(params: ZeroXV1SwapParams): Promise<ZeroXSwapResu
     sellAmountRaw,
     recipient,
   ]);
-  const cachedV1Method = getQuoteCache<{ to: string; calldata: string; value: string }>(v1CacheKey);
+  const cachedV1Method = getQuoteCache<{ to: string; calldata: string; value: string; buyAmount: string | null }>(v1CacheKey);
   let methodParameters: { to: string; calldata: string; value: string };
+  let buyAmount: string | null = null;
 
   if (cachedV1Method) {
-    methodParameters = cachedV1Method;
+    methodParameters = { to: cachedV1Method.to, calldata: cachedV1Method.calldata, value: cachedV1Method.value };
+    buyAmount = cachedV1Method.buyAmount ?? null;
   } else {
     console.log('[test-swap] 0x v1 request context', {
       resolvedChainKey,
@@ -1158,7 +1160,8 @@ async function execute0xV1Swap(params: ZeroXV1SwapParams): Promise<ZeroXSwapResu
       throw new Error(`0x ${resolvedChainKey} response missing to/data/value`);
     }
     methodParameters = { to: v1Payload.to, calldata: v1Payload.data, value: v1Payload.value };
-    setQuoteCache(v1CacheKey, methodParameters);
+    buyAmount = v1Payload.buyAmount ?? null;
+    setQuoteCache(v1CacheKey, { ...methodParameters, buyAmount });
   }
 
   return {
@@ -1169,7 +1172,7 @@ async function execute0xV1Swap(params: ZeroXV1SwapParams): Promise<ZeroXSwapResu
     buyTokenAddress: normalizedBuyToken === 'ETH' ? ZEROX_ETH_PLACEHOLDER : (resolvedEvmBuyToken?.address ?? tokenConfig[normalizedBuyToken]?.address),
     providerFee: null,
     integratorFee: null,
-    buyAmount: v1Payload?.buyAmount ?? null,
+    buyAmount,
   };
 }
 

@@ -8,3 +8,4 @@ dist
 out
 coverage
 *.log
+...git
