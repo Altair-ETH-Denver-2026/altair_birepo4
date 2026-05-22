@@ -8,7 +8,9 @@
       "Bash(yarn typecheck *)",
       "Bash(wait %1)",
       "Read(//tmp/**)",
-      "Bash(yarn add *)"
+      "Bash(yarn add *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(yarn build *)"
     ]
   }
 }
