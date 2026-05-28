@@ -7,7 +7,6 @@ import { usePrivy } from '@privy-io/react-auth';
 import { useWallets, useSignAndSendTransaction } from '@privy-io/react-auth/solana';
 import { readCachedTokenSnapshot, resolveSelectedChain } from './useSwap';
 import { dispatchSwapSubmitted, dispatchBalanceStale } from './eventTypes';
-import { getBackendBaseUrl } from './backendUrl';
 import type { ChainKey } from '../../config/blockchain_config';
 import { GAS_TOKENS } from '../../config/blockchain_config';
 
@@ -97,7 +96,7 @@ export function useSolanaSwap(explicitChain?: ChainKey) {
         description: 'Solana swap route response',
       },
       () =>
-        fetch(`${getBackendBaseUrl()}/api/test-swap`, {
+        fetch('/api/test-swap', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -261,7 +260,7 @@ export function useSolanaSwap(explicitChain?: ChainKey) {
           description: 'Solana swap writeback after confirmation',
         },
         () =>
-          fetch(`${getBackendBaseUrl()}/api/test-swap`, {
+          fetch('/api/test-swap', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

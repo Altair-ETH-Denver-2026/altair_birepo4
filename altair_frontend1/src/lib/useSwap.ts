@@ -6,7 +6,6 @@ import { withWaitLogger } from './waitLogger';
 import { BLOCKCHAIN, CHAINS, GAS_TOKENS, SWAP_PROVIDER_OPTIONS, type ChainKey } from '@config/blockchain_config';
 import { BASE_MAINNET, BASE_SEPOLIA, ETH_MAINNET, ETH_SEPOLIA, resolveRpcUrls } from '@config/chain_info';
 import { dispatchSwapSubmitted, dispatchBalanceStale } from './eventTypes';
-import { getBackendBaseUrl } from './backendUrl';
 
 const chainConfigs = {
   BASE_SEPOLIA,
@@ -377,7 +376,7 @@ export const useSwap = (explicitChain?: ChainKey) => {
                 description: `swap route response (${providerName})`,
               },
               () =>
-                fetch(`${getBackendBaseUrl()}/api/test-swap`, {
+                fetch('/api/test-swap', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   credentials: 'include',
@@ -508,7 +507,7 @@ export const useSwap = (explicitChain?: ChainKey) => {
                 description: 'swap writeback after confirmation',
               },
               async () => {
-                const writebackRes = await fetch(`${getBackendBaseUrl()}/api/test-swap`, {
+                const writebackRes = await fetch('/api/test-swap', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   credentials: 'include',
