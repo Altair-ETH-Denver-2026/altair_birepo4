@@ -54,6 +54,7 @@ const isAllowedOrigin = (origin: string) => {
 
   const prod = resolveFrontendProd();
   if (prod && normalizedOrigin === prod) return true;
+  if (matchesProdFrontend(normalizedOrigin)) return true;
 
   const devPrefix = resolveFrontendDevPrefix();
   if (devPrefix) {
@@ -76,6 +77,7 @@ export const resolveFrontendOrigin = (requestOrigin?: string | null) => {
     return normalizedOrigin;
   }
 
+  // No Origin header (same-origin or server-to-server): a sane default is fine.
   return resolveFrontendOverride() ?? resolveFrontendLocal() ?? resolveFrontendProd();
 };
 
